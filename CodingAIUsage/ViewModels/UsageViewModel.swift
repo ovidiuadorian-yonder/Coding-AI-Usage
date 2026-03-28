@@ -22,11 +22,12 @@ final class UsageViewModel: ObservableObject {
     private let notificationService = NotificationService()
     let scheduler = PollingScheduler()
 
-    // Status checks
+    // Status checks (cached - only re-checked on manual refresh)
     @Published var claudeInstalled = false
     @Published var claudeLoggedIn = false
     @Published var codexInstalled = false
     @Published var codexLoggedIn = false
+    private var prerequisitesChecked = false
 
     init() {
         notificationService.requestPermission()
@@ -52,7 +53,10 @@ final class UsageViewModel: ObservableObject {
         isRefreshing = true
         errors.removeAll()
 
-        await checkPrerequisitesAsync()
+        if !prerequisitesChecked {
+            await checkPrerequisitesAsync()
+            prerequisitesChecked = true
+        }
 
         async let claudeResult: Void = fetchClaude()
         async let codexResult: Void = fetchCodex()
@@ -63,6 +67,7 @@ final class UsageViewModel: ObservableObject {
 
     func manualRefresh() {
         scheduler.resetBackoff()
+        prerequisitesChecked = false // Re-check on manual refresh
         Task {
             await refresh()
         }
@@ -75,60 +80,6 @@ final class UsageViewModel: ObservableObject {
 
     // MARK: - Menu Bar Text
 
-    var menuBarText: AttributedString {
-        var parts: [(String, UsageLevel, UsageLevel)] = [] // (text, 5hLevel, wLevel)
-
-        if showClaude, let claude = claudeUsage, claude.error == nil {
-            let fh = claude.fiveHourWindow
-            let w = claude.weeklyWindow
-            parts.append((
-                "CC",
-                fh?.level ?? .normal,
-                w?.level ?? .normal
-            ))
-        }
-
-        if showCodex, let codex = codexUsage, codex.error == nil, !codex.windows.isEmpty {
-            let fh = codex.fiveHourWindow
-            let w = codex.weeklyWindow
-            parts.append((
-                "CX",
-                fh?.level ?? .normal,
-                w?.level ?? .normal
-            ))
-        }
-
-        if parts.isEmpty {
-            return AttributedString("Coding Usage")
-        }
-
-        var result = AttributedString()
-        for (i, part) in parts.enumerated() {
-            if i > 0 {
-                result += AttributedString("  ")
-            }
-
-            let service = part.0 == "CC" ? claudeUsage : codexUsage
-            let fhPercent = service?.fiveHourWindow?.remainingPercent ?? 0
-            let wPercent = service?.weeklyWindow?.remainingPercent ?? 0
-
-            result += AttributedString("\(part.0) %5h ")
-
-            var fhAttr = AttributedString("\(fhPercent)")
-            fhAttr.foregroundColor = part.1 == .critical ? .red : .green
-            result += fhAttr
-
-            result += AttributedString(" %W ")
-
-            var wAttr = AttributedString("\(wPercent)")
-            wAttr.foregroundColor = part.2 == .critical ? .red : .green
-            result += wAttr
-        }
-
-        return result
-    }
-
-    // Plain text for status bar (NSAttributedString doesn't work in MenuBarExtra label)
     var menuBarPlainText: String {
         var parts: [String] = []
 
@@ -224,6 +175,8 @@ final class UsageViewModel: ObservableObject {
                     windows: [], lastUpdated: Date(), error: error.localizedDescription
                 )
             }
+        } catch is DecodingError {
+            errors.append("Claude Code: unexpected API response format")
         } catch {
             errors.append("Claude Code: \(error.localizedDescription)")
         }
@@ -253,6 +206,8 @@ final class UsageViewModel: ObservableObject {
                     windows: [], lastUpdated: Date(), error: error.localizedDescription
                 )
             }
+        } catch is DecodingError {
+            errors.append("Codex: unexpected API response format")
         } catch {
             errors.append("Codex: \(error.localizedDescription)")
         }

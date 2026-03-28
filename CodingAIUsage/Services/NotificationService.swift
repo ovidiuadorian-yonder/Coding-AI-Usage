@@ -1,6 +1,7 @@
 import Foundation
 import UserNotifications
 
+@MainActor
 final class NotificationService {
     private var lastAlerts: [String: Date] = [:]
     private var previousLevels: [String: UsageLevel] = [:]
@@ -11,8 +12,10 @@ final class NotificationService {
     func requestPermission() {
         // UNUserNotificationCenter requires a proper app bundle
         guard Bundle.main.bundleIdentifier != nil else { return }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
-            self?.permissionGranted = granted
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            Task { @MainActor [weak self] in
+                self?.permissionGranted = granted
+            }
         }
     }
 

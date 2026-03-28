@@ -47,13 +47,11 @@ actor ClaudeUsageService {
         for path in paths {
             if FileManager.default.isExecutableFile(atPath: path) { return true }
         }
-        // Also check via which
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         process.arguments = ["claude"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
         do {
             try process.run()
             process.waitUntilExit()
