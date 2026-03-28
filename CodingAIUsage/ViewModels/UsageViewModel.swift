@@ -30,8 +30,11 @@ final class UsageViewModel: ObservableObject {
 
     init() {
         notificationService.requestPermission()
-        checkPrerequisites()
-        startPolling()
+        // Start polling after a short delay to let prerequisites check complete
+        Task { @MainActor in
+            await checkPrerequisitesAsync()
+            startPolling()
+        }
     }
 
     func startPolling() {
@@ -49,7 +52,7 @@ final class UsageViewModel: ObservableObject {
         isRefreshing = true
         errors.removeAll()
 
-        checkPrerequisites()
+        await checkPrerequisitesAsync()
 
         async let claudeResult: Void = fetchClaude()
         async let codexResult: Void = fetchCodex()
@@ -158,29 +161,24 @@ final class UsageViewModel: ObservableObject {
 
     // MARK: - Private
 
-    private func checkPrerequisites() {
-        Task.detached { [weak self] in
-            guard let self else { return }
-            let ci = await self.claudeService.checkInstalled()
-            let cxi = await self.codexService.checkInstalled()
-            let cl = KeychainService().isClaudeLoggedIn()
-            let cxl = await self.codexService.isLoggedIn()
+    private func checkPrerequisitesAsync() async {
+        let ci = await claudeService.checkInstalled()
+        let cxi = await codexService.checkInstalled()
+        let cl = KeychainService().isClaudeLoggedIn()
+        let cxl = await codexService.isLoggedIn()
 
-            await MainActor.run {
-                self.claudeInstalled = ci
-                self.claudeLoggedIn = cl
-                self.codexInstalled = cxi
-                self.codexLoggedIn = cxl
+        claudeInstalled = ci
+        claudeLoggedIn = cl
+        codexInstalled = cxi
+        codexLoggedIn = cxl
 
-                if self.showClaude {
-                    if !ci { self.errors.append("Claude Code not installed") }
-                    else if !cl { self.errors.append("Claude Code: not logged in") }
-                }
-                if self.showCodex {
-                    if !cxi { self.errors.append("Codex not installed") }
-                    else if !cxl { self.errors.append("Codex: not logged in") }
-                }
-            }
+        if showClaude {
+            if !ci { errors.append("Claude Code not installed") }
+            else if !cl { errors.append("Claude Code: not logged in") }
+        }
+        if showCodex {
+            if !cxi { errors.append("Codex not installed") }
+            else if !cxl { errors.append("Codex: not logged in") }
         }
     }
 
@@ -200,10 +198,8 @@ final class UsageViewModel: ObservableObject {
             switch error {
             case .rateLimited(let retryAfter):
                 scheduler.reportRateLimited(retryAfter: retryAfter)
-                // Keep showing last known data, just add a note
-                if claudeUsage == nil {
-                    errors.append("Claude Code: rate limited, retrying...")
-                }
+                let retryText = retryAfter.map { " (retry in \(Int($0))s)" } ?? ""
+                errors.append("Claude Code: rate limited\(retryText) - will retry automatically")
             default:
                 errors.append(error.localizedDescription)
                 claudeUsage = ServiceUsage(
@@ -231,6 +227,8 @@ final class UsageViewModel: ObservableObject {
             switch error {
             case .rateLimited(let retryAfter):
                 scheduler.reportRateLimited(retryAfter: retryAfter)
+                let retryText = retryAfter.map { " (retry in \(Int($0))s)" } ?? ""
+                errors.append("Codex: rate limited\(retryText) - will retry automatically")
             default:
                 errors.append(error.localizedDescription)
                 codexUsage = ServiceUsage(

@@ -2,8 +2,7 @@ import Foundation
 
 actor CodexUsageService {
     private let authFilePath = NSHomeDirectory() + "/.codex/auth.json"
-    // Codex usage endpoint - attempt ChatGPT-based usage API
-    private let usageURL = URL(string: "https://api.openai.com/v1/usage")!
+    private let usageURL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
 
     func fetchUsage() async throws -> ServiceUsage {
         guard let auth = readAuthFile() else {
@@ -14,10 +13,10 @@ actor CodexUsageService {
             throw UsageError.noCredentials("Codex: no access token found")
         }
 
-        // Try the OpenAI usage API with the ChatGPT OAuth token
         var request = URLRequest(url: usageURL)
         request.httpMethod = "GET"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 15
 
         let (data, response): (Data, URLResponse)
@@ -33,21 +32,10 @@ actor CodexUsageService {
 
         switch httpResponse.statusCode {
         case 200:
-            // Try to parse as CodexUsageResponse
-            if let usage = try? JSONDecoder().decode(CodexUsageResponse.self, from: data) {
-                return usage.toServiceUsage()
-            }
-            // If the response format is different, return a basic service usage
-            return ServiceUsage(
-                id: "codex",
-                displayName: "Codex",
-                shortLabel: "CX",
-                windows: [],
-                lastUpdated: Date(),
-                error: "Codex: usage data format not supported"
-            )
-        case 401:
-            throw UsageError.authExpired("Codex: session expired - please re-login in Codex CLI")
+            let usage = try JSONDecoder().decode(CodexUsageResponse.self, from: data)
+            return usage.toServiceUsage()
+        case 401, 403:
+            throw UsageError.authExpired("Codex: session expired - run 'codex login' to re-authenticate")
         case 429:
             let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After")
                 .flatMap { Double($0) }

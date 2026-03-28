@@ -22,47 +22,64 @@ struct CodexTokens: Codable {
     }
 }
 
-// Codex usage response structure (best-effort, may vary)
+// Matches the actual response from https://chatgpt.com/backend-api/wham/usage
 struct CodexUsageResponse: Codable {
-    let fiveHour: CodexWindowData?
-    let sevenDay: CodexWindowData?
+    let rateLimit: CodexRateLimit?
 
     enum CodingKeys: String, CodingKey {
-        case fiveHour = "five_hour"
-        case sevenDay = "seven_day"
+        case rateLimit = "rate_limit"
+    }
+
+    struct CodexRateLimit: Codable {
+        let allowed: Bool?
+        let limitReached: Bool?
+        let primaryWindow: CodexWindowData?
+        let secondaryWindow: CodexWindowData?
+
+        enum CodingKeys: String, CodingKey {
+            case allowed
+            case limitReached = "limit_reached"
+            case primaryWindow = "primary_window"
+            case secondaryWindow = "secondary_window"
+        }
     }
 
     struct CodexWindowData: Codable {
-        let utilization: Double?
-        let resetAt: String?
+        let usedPercent: Int
+        let limitWindowSeconds: Int?
+        let resetAfterSeconds: Int?
+        let resetAt: Int? // Unix timestamp
 
         enum CodingKeys: String, CodingKey {
-            case utilization
+            case usedPercent = "used_percent"
+            case limitWindowSeconds = "limit_window_seconds"
+            case resetAfterSeconds = "reset_after_seconds"
             case resetAt = "reset_at"
         }
     }
 
     func toServiceUsage() -> ServiceUsage {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
         var windows: [UsageWindow] = []
 
-        if let fh = fiveHour, let util = fh.utilization {
+        if let primary = rateLimit?.primaryWindow {
+            let utilization = Double(primary.usedPercent) / 100.0
+            let resetTime = primary.resetAt.map { Date(timeIntervalSince1970: Double($0)) }
             windows.append(UsageWindow(
                 id: "five_hour",
                 name: "5-Hour",
-                utilization: util,
-                resetTime: fh.resetAt.flatMap { formatter.date(from: $0) }
+                utilization: utilization,
+                resetTime: resetTime
             ))
         }
 
-        if let sd = sevenDay, let util = sd.utilization {
+        if let secondary = rateLimit?.secondaryWindow {
+            let utilization = Double(secondary.usedPercent) / 100.0
+            let resetTime = secondary.resetAt.map { Date(timeIntervalSince1970: Double($0)) }
             windows.append(UsageWindow(
                 id: "seven_day",
                 name: "Weekly",
-                utilization: util,
-                resetTime: sd.resetAt.flatMap { formatter.date(from: $0) }
+                utilization: utilization,
+                resetTime: resetTime
             ))
         }
 
