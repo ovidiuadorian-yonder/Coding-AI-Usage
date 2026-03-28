@@ -86,13 +86,13 @@ final class UsageViewModel: ObservableObject {
         if showClaude, let claude = claudeUsage, claude.error == nil {
             let fh = claude.fiveHourWindow?.remainingPercent ?? 0
             let w = claude.weeklyWindow?.remainingPercent ?? 0
-            parts.append("CC %5h \(fh) %W \(w)")
+            parts.append("CC 5h% \(fh) | w% \(w)")
         }
 
         if showCodex, let codex = codexUsage, codex.error == nil, !codex.windows.isEmpty {
             let fh = codex.fiveHourWindow?.remainingPercent ?? 0
             let w = codex.weeklyWindow?.remainingPercent ?? 0
-            parts.append("CX %5h \(fh) %W \(w)")
+            parts.append("CX 5h% \(fh) | w% \(w)")
         }
 
         if parts.isEmpty {
