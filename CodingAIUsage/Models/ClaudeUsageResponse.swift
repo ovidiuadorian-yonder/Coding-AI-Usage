@@ -5,12 +5,12 @@ struct ClaudeUsageResponse: Codable {
     let sevenDay: WindowData
 
     struct WindowData: Codable {
-        let utilization: Double
-        let resetAt: String
+        let utilization: Double    // 0-100 percentage USED
+        let resetsAt: String?
 
         enum CodingKeys: String, CodingKey {
             case utilization
-            case resetAt = "reset_at"
+            case resetsAt = "resets_at"
         }
     }
 
@@ -23,8 +23,8 @@ struct ClaudeUsageResponse: Codable {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
-        let fiveHourReset = formatter.date(from: fiveHour.resetAt)
-        let sevenDayReset = formatter.date(from: sevenDay.resetAt)
+        let fiveHourReset = fiveHour.resetsAt.flatMap { formatter.date(from: $0) }
+        let sevenDayReset = sevenDay.resetsAt.flatMap { formatter.date(from: $0) }
 
         return ServiceUsage(
             id: "claude",
@@ -34,13 +34,13 @@ struct ClaudeUsageResponse: Codable {
                 UsageWindow(
                     id: "five_hour",
                     name: "5-Hour",
-                    utilization: fiveHour.utilization,
+                    utilization: fiveHour.utilization / 100.0,
                     resetTime: fiveHourReset
                 ),
                 UsageWindow(
                     id: "seven_day",
                     name: "Weekly",
-                    utilization: sevenDay.utilization,
+                    utilization: sevenDay.utilization / 100.0,
                     resetTime: sevenDayReset
                 )
             ],
