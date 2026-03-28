@@ -62,6 +62,7 @@ final class UsageViewModel: ObservableObject {
     }
 
     func manualRefresh() {
+        scheduler.resetBackoff()
         Task {
             await refresh()
         }

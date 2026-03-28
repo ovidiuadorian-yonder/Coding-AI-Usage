@@ -32,10 +32,15 @@ final class PollingScheduler: ObservableObject {
 
     func reportRateLimited(retryAfter: TimeInterval?) {
         if let retryAfter {
-            currentInterval = retryAfter + 30
+            // Cap retry-after to maxInterval to avoid absurdly long waits
+            currentInterval = min(retryAfter + 30, maxInterval)
         } else {
             currentInterval = min(currentInterval * 2, maxInterval)
         }
+    }
+
+    func resetBackoff() {
+        currentInterval = baseInterval
     }
 
     func updateBaseInterval(_ interval: TimeInterval) {
