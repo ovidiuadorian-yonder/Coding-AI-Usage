@@ -151,6 +151,22 @@ final class UsageViewModel: ObservableObject {
         return parts.joined(separator: "  ")
     }
 
+    var lastUpdated: Date? {
+        [claudeUsage?.lastUpdated, codexUsage?.lastUpdated]
+            .compactMap { $0 }
+            .max()
+    }
+
+    var pollingIntervalLabel: String {
+        switch pollingIntervalSeconds {
+        case ...180: return "3 min"
+        case ...300: return "5 min"
+        case ...600: return "10 min"
+        case ...1800: return "30 min"
+        default: return "1 hr"
+        }
+    }
+
     var worstLevel: UsageLevel {
         let levels = [claudeUsage?.worstLevel, codexUsage?.worstLevel].compactMap { $0 }
         return levels.max() ?? .normal

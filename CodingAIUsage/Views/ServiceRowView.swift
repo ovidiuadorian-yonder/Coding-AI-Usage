@@ -18,11 +18,6 @@ struct ServiceRowView: View {
                 }
             }
 
-            if let lastUpdate = usage.lastUpdated as Date? {
-                Text("Updated \(lastUpdate, style: .relative) ago")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
         }
         .padding(.vertical, 4)
     }

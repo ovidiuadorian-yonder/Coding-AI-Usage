@@ -45,6 +45,13 @@ struct UsageDetailView: View {
                 }
             }
 
+            // Single updated label
+            if let lastUpdated = viewModel.lastUpdated {
+                Text("Updated (every \(viewModel.pollingIntervalLabel)) \(lastUpdated, style: .relative) ago")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
             Divider()
 
             // Buttons
