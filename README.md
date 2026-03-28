@@ -12,11 +12,11 @@
 
 **Menu bar** (always visible):
 ```
-CC %5h 50 %W 63  CX %5h 99 %W 89
+CC 5h% 50 | w% 63  CX 5h% 99 | w% 89
 ```
-- `CC` = Claude Code, `CX` = Codex
-- `%5h` = 5-hour window remaining, `%W` = weekly window remaining
-- Numbers turn **red** when below 10%
+- `CC` = Claude Code (purple badge), `CX` = Codex (teal badge)
+- `5h%` = 5-hour window remaining, `w%` = weekly window remaining
+- Numbers are color-coded: **green** (≥ 30%), **yellow** (10–30%), **red** (< 10%)
 
 **Dropdown panel** (click to expand): detailed progress bars, reset countdowns, and error messages.
 
@@ -119,14 +119,15 @@ The status bar text updates automatically based on your polling interval:
 
 | Display | Meaning |
 |---|---|
-| `CC %5h 50 %W 63  CX %5h 99 %W 89` | Both services enabled with usage data |
-| `CC %5h 50 %W 63` | Only Claude Code enabled |
-| `CX %5h 99 %W 89` | Only Codex enabled |
+| `CC 5h% 50 \| w% 63  CX 5h% 99 \| w% 89` | Both services enabled with usage data |
+| `CC 5h% 50 \| w% 63` | Only Claude Code enabled |
+| `CX 5h% 99 \| w% 89` | Only Codex enabled |
 | `Coding Usage` | No services enabled or no data yet |
 
-- **%5h** = percentage remaining in the 5-hour rolling window
-- **%W** = percentage remaining in the 7-day weekly window
-- Numbers in **green** = healthy (>= 10% remaining)
+- **5h%** = percentage remaining in the 5-hour rolling window
+- **w%** = percentage remaining in the 7-day weekly window
+- Numbers in **green** = healthy (≥ 30% remaining)
+- Numbers in **yellow** = warning (10–30% remaining)
 - Numbers in **red** = critical (< 10% remaining)
 
 ### Dropdown Panel
