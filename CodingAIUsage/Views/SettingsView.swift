@@ -1,0 +1,80 @@
+import SwiftUI
+
+struct SettingsView: View {
+    @ObservedObject var viewModel: UsageViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    private let pollingOptions: [(String, Double)] = [
+        ("3 minutes", 180),
+        ("5 minutes", 300),
+        ("10 minutes", 600),
+        ("30 minutes", 1800),
+        ("1 hour", 3600)
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Settings")
+                .font(.title2.bold())
+
+            // Services
+            GroupBox("Services") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Claude Code", isOn: $viewModel.showClaude)
+                    Toggle("Codex", isOn: $viewModel.showCodex)
+                }
+                .padding(.vertical, 4)
+            }
+
+            // Polling
+            GroupBox("Polling Interval") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("Refresh every:", selection: $viewModel.pollingIntervalSeconds) {
+                        ForEach(pollingOptions, id: \.1) { option in
+                            Text(option.0).tag(option.1)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: viewModel.pollingIntervalSeconds) { _, newValue in
+                        viewModel.updatePollingInterval(newValue)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            // Alert threshold
+            GroupBox("Alert Threshold") {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Notify when remaining below:")
+                        Spacer()
+                        Text("\(Int(viewModel.alertThreshold * 100))%")
+                            .monospacedDigit()
+                    }
+                    Slider(value: $viewModel.alertThreshold, in: 0.05...0.30, step: 0.05)
+                }
+                .padding(.vertical, 4)
+            }
+
+            // Launch at login
+            GroupBox("General") {
+                Toggle("Launch at Login", isOn: $viewModel.launchAtLogin)
+                    .padding(.vertical, 4)
+            }
+
+            // Remark
+            Text("Claude Code and Codex must be installed and logged in for usage tracking to work.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding()
+        .frame(width: 380)
+    }
+}
