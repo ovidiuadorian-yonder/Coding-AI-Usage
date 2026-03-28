@@ -43,7 +43,11 @@ actor ClaudeUsageService {
     }
 
     func checkInstalled() -> Bool {
-        let paths = ["/usr/local/bin/claude", "/opt/homebrew/bin/claude"]
+        let paths = [
+            "/usr/local/bin/claude",
+            "/opt/homebrew/bin/claude",
+            NSHomeDirectory() + "/.local/bin/claude"
+        ]
         for path in paths {
             if FileManager.default.isExecutableFile(atPath: path) { return true }
         }

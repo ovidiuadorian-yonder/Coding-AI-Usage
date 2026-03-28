@@ -4,6 +4,27 @@ import SQLite3
 @testable import CodingAIUsage
 
 final class WindsurfUsageTests: XCTestCase {
+    func testClaudeCheckInstalledFindsUserLocalBinaryWithoutPATH() async throws {
+        let localClaudePath = NSHomeDirectory() + "/.local/bin/claude"
+        guard FileManager.default.isExecutableFile(atPath: localClaudePath) else {
+            throw XCTSkip("This machine does not install claude under ~/.local/bin")
+        }
+
+        let originalPath = ProcessInfo.processInfo.environment["PATH"]
+        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        defer {
+            if let originalPath {
+                setenv("PATH", originalPath, 1)
+            } else {
+                unsetenv("PATH")
+            }
+        }
+
+        let installed = await ClaudeUsageService().checkInstalled()
+
+        XCTAssertTrue(installed)
+    }
+
     @MainActor
     func testNotificationTrackingDoesNotAdvanceBeforePermissionIsAvailable() {
         let service = NotificationService()
