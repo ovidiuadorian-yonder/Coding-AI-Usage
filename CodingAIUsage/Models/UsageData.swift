@@ -17,8 +17,17 @@ enum UsageLevel: Comparable {
 struct UsageWindow: Identifiable {
     let id: String
     let name: String
+    let compactLabel: String
     let utilization: Double // 0.0 to 1.0 (percentage USED)
     let resetTime: Date?
+
+    init(id: String, name: String, compactLabel: String? = nil, utilization: Double, resetTime: Date?) {
+        self.id = id
+        self.name = name
+        self.compactLabel = compactLabel ?? UsageWindow.defaultCompactLabel(for: id, name: name)
+        self.utilization = utilization
+        self.resetTime = resetTime
+    }
 
     var remaining: Double { max(0, 1.0 - utilization) }
     var remainingPercent: Int { Int(remaining * 100) }
@@ -27,6 +36,17 @@ struct UsageWindow: Identifiable {
         if remaining < 0.10 { return .critical }
         if remaining < 0.30 { return .warning }
         return .normal
+    }
+
+    private static func defaultCompactLabel(for id: String, name: String) -> String {
+        let lowered = "\(id) \(name)".lowercased()
+        if lowered.contains("five") || lowered.contains("5h") {
+            return "5h"
+        }
+        if lowered.contains("daily") {
+            return "d"
+        }
+        return "w"
     }
 }
 
@@ -37,17 +57,44 @@ struct ServiceUsage: Identifiable {
     let windows: [UsageWindow]
     let lastUpdated: Date
     let error: String?
+    let footerLines: [String]
+
+    init(
+        id: String,
+        displayName: String,
+        shortLabel: String,
+        windows: [UsageWindow],
+        lastUpdated: Date,
+        error: String?,
+        footerLines: [String] = []
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.shortLabel = shortLabel
+        self.windows = windows
+        self.lastUpdated = lastUpdated
+        self.error = error
+        self.footerLines = footerLines
+    }
 
     var worstLevel: UsageLevel {
         windows.map(\.level).max() ?? .normal
     }
 
+    var primaryWindow: UsageWindow? {
+        windows.first
+    }
+
+    var secondaryWindow: UsageWindow? {
+        windows.dropFirst().first
+    }
+
     var fiveHourWindow: UsageWindow? {
-        windows.first { $0.id.contains("five") || $0.id.contains("5h") }
+        windows.first { $0.id.contains("five") || $0.id.contains("5h") || $0.compactLabel == "5h" }
     }
 
     var weeklyWindow: UsageWindow? {
-        windows.first { $0.id.contains("seven") || $0.id.contains("week") }
+        windows.first { $0.id.contains("seven") || $0.id.contains("week") || $0.compactLabel == "w" }
     }
 }
 

@@ -29,16 +29,20 @@ struct UsageDetailView: View {
                 ServiceRowView(usage: codex)
             }
 
-            if !viewModel.showClaude && !viewModel.showCodex {
-                Text("No services enabled. Enable Claude Code or Codex in Settings.")
+            if let windsurf = viewModel.windsurfUsage, viewModel.showWindsurf {
+                ServiceRowView(usage: windsurf)
+            }
+
+            if !viewModel.showClaude && !viewModel.showCodex && !viewModel.showWindsurf {
+                Text("No services enabled. Enable Claude Code, Codex, or Windsurf in Settings.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
             // Errors
-            if !viewModel.errors.isEmpty {
+            if !viewModel.globalErrors.isEmpty {
                 Divider()
-                ForEach(viewModel.errors, id: \.self) { error in
+                ForEach(viewModel.globalErrors, id: \.self) { error in
                     Text(error)
                         .font(.caption)
                         .foregroundColor(.red)

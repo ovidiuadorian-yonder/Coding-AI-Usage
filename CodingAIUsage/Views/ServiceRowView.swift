@@ -18,6 +18,12 @@ struct ServiceRowView: View {
                 }
             }
 
+            ForEach(usage.footerLines, id: \.self) { line in
+                Text(line)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
         }
         .padding(.vertical, 4)
     }

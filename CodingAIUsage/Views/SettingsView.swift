@@ -17,11 +17,16 @@ struct SettingsView: View {
             Text("Settings")
                 .font(.title2.bold())
 
+            Text(viewModel.enabledServicesSummary)
+                .font(.caption)
+                .foregroundColor(.secondary)
+
             // Services
             GroupBox("Services") {
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("Claude Code", isOn: $viewModel.showClaude)
                     Toggle("Codex", isOn: $viewModel.showCodex)
+                    Toggle("Windsurf", isOn: $viewModel.showWindsurf)
                 }
                 .padding(.vertical, 4)
             }
@@ -63,7 +68,7 @@ struct SettingsView: View {
             }
 
             // Remark
-            Text("Claude Code and Codex must be installed and logged in for usage tracking to work.")
+            Text("Claude Code, Codex, and Windsurf must be installed and logged in for usage tracking to work. Windsurf daily and weekly quotas use cached local state first, then an experimental session-backed scrape only if exact quota data is missing.")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -34,18 +34,21 @@ struct ClaudeUsageResponse: Codable {
                 UsageWindow(
                     id: "five_hour",
                     name: "5-Hour",
+                    compactLabel: "5h",
                     utilization: fiveHour.utilization / 100.0,
                     resetTime: fiveHourReset
                 ),
                 UsageWindow(
                     id: "seven_day",
                     name: "Weekly",
+                    compactLabel: "w",
                     utilization: sevenDay.utilization / 100.0,
                     resetTime: sevenDayReset
                 )
             ],
             lastUpdated: Date(),
-            error: nil
+            error: nil,
+            footerLines: []
         )
     }
 }

@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AI-Usage-Plugin}",
+            "name": "Debug CodingAIUsage",
+            "program": "${workspaceFolder:AI-Usage-Plugin}/.build/debug/CodingAIUsage",
+            "preLaunchTask": "swift: Build Debug CodingAIUsage"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AI-Usage-Plugin}",
+            "name": "Release CodingAIUsage",
+            "program": "${workspaceFolder:AI-Usage-Plugin}/.build/release/CodingAIUsage",
+            "preLaunchTask": "swift: Build Release CodingAIUsage"
+        }
+    ]
+}

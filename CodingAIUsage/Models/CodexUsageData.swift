@@ -67,6 +67,7 @@ struct CodexUsageResponse: Codable {
             windows.append(UsageWindow(
                 id: "five_hour",
                 name: "5-Hour",
+                compactLabel: "5h",
                 utilization: utilization,
                 resetTime: resetTime
             ))
@@ -78,6 +79,7 @@ struct CodexUsageResponse: Codable {
             windows.append(UsageWindow(
                 id: "seven_day",
                 name: "Weekly",
+                compactLabel: "w",
                 utilization: utilization,
                 resetTime: resetTime
             ))
@@ -89,7 +91,8 @@ struct CodexUsageResponse: Codable {
             shortLabel: "CX",
             windows: windows,
             lastUpdated: Date(),
-            error: nil
+            error: nil,
+            footerLines: []
         )
     }
 }

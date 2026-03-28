@@ -4,6 +4,25 @@ import AppKit
 struct MenuBarLabel: View {
     @ObservedObject var viewModel: UsageViewModel
 
+    struct MenuBarServiceState {
+        let usage: ServiceUsage?
+        let isVisible: Bool
+        let badgeColor: NSColor?
+    }
+
+    struct MenuBarPart {
+        let label: String
+        let badgeColor: NSColor
+        let primaryLabel: String
+        let primaryPercent: Int
+        let primaryText: String
+        let primaryLevel: UsageLevel
+        let secondaryLabel: String
+        let secondaryPercent: Int
+        let secondaryText: String
+        let secondaryLevel: UsageLevel
+    }
+
     var body: some View {
         Image(nsImage: renderMenuBarImage())
     }
@@ -38,20 +57,20 @@ struct MenuBarLabel: View {
             segments.append((NSAttributedString(string: part.label, attributes: badgeAttrs), part.badgeColor))
 
             // Usage values
-            segments.append((NSAttributedString(string: " 5h% ", attributes: normalAttrs), nil))
+            segments.append((NSAttributedString(string: " \(part.primaryLabel)% ", attributes: normalAttrs), nil))
             segments.append((NSAttributedString(
-                string: "\(part.fiveHourPercent)",
+                string: part.primaryText,
                 attributes: [
                     .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
-                    .foregroundColor: colorForLevel(part.fiveHourLevel)
+                    .foregroundColor: colorForDisplay(part.primaryText, level: part.primaryLevel)
                 ]
             ), nil))
-            segments.append((NSAttributedString(string: " | w% ", attributes: normalAttrs), nil))
+            segments.append((NSAttributedString(string: " | \(part.secondaryLabel)% ", attributes: normalAttrs), nil))
             segments.append((NSAttributedString(
-                string: "\(part.weeklyPercent)",
+                string: part.secondaryText,
                 attributes: [
                     .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
-                    .foregroundColor: colorForLevel(part.weeklyLevel)
+                    .foregroundColor: colorForDisplay(part.secondaryText, level: part.secondaryLevel)
                 ]
             ), nil))
         }
@@ -59,41 +78,70 @@ struct MenuBarLabel: View {
         return renderSegments(segments)
     }
 
-    private struct MenuBarPart {
-        let label: String
-        let badgeColor: NSColor
-        let fiveHourPercent: Int
-        let fiveHourLevel: UsageLevel
-        let weeklyPercent: Int
-        let weeklyLevel: UsageLevel
+    private func buildParts() -> [MenuBarPart] {
+        Self.menuBarParts(services: [
+            MenuBarServiceState(
+                usage: viewModel.claudeUsage,
+                isVisible: viewModel.showClaude,
+                badgeColor: NSColor(red: 0.45, green: 0.27, blue: 0.80, alpha: 1.0)
+            ),
+            MenuBarServiceState(
+                usage: viewModel.codexUsage,
+                isVisible: viewModel.showCodex,
+                badgeColor: NSColor(red: 0.07, green: 0.60, blue: 0.52, alpha: 1.0)
+            ),
+            MenuBarServiceState(
+                usage: viewModel.windsurfUsage,
+                isVisible: viewModel.showWindsurf,
+                badgeColor: NSColor(red: 0.0, green: 0.47, blue: 0.84, alpha: 1.0)
+            )
+        ])
     }
 
-    private func buildParts() -> [MenuBarPart] {
-        var parts: [MenuBarPart] = []
+    static func menuBarParts(services: [MenuBarServiceState]) -> [MenuBarPart] {
+        services.compactMap { service in
+            guard
+                service.isVisible,
+                let usage = service.usage,
+                shouldDisplayInMenuBar(usage)
+            else {
+                return nil
+            }
 
-        if viewModel.showClaude, let claude = viewModel.claudeUsage, claude.error == nil {
-            parts.append(MenuBarPart(
-                label: "CC",
-                badgeColor: NSColor(red: 0.45, green: 0.27, blue: 0.80, alpha: 1.0), // Anthropic purple
-                fiveHourPercent: claude.fiveHourWindow?.remainingPercent ?? 0,
-                fiveHourLevel: claude.fiveHourWindow?.level ?? .normal,
-                weeklyPercent: claude.weeklyWindow?.remainingPercent ?? 0,
-                weeklyLevel: claude.weeklyWindow?.level ?? .normal
-            ))
+            let defaultLabels: (String, String) = usage.shortLabel == "W" ? ("d", "w") : ("5h", "w")
+            let primaryWindow = usage.primaryWindow
+            let secondaryWindow = usage.secondaryWindow
+
+            return MenuBarPart(
+                label: usage.shortLabel,
+                badgeColor: service.badgeColor ?? defaultBadgeColor(for: usage.shortLabel),
+                primaryLabel: primaryWindow?.compactLabel ?? defaultLabels.0,
+                primaryPercent: primaryWindow?.remainingPercent ?? 0,
+                primaryText: primaryWindow.map { "\($0.remainingPercent)" } ?? "--",
+                primaryLevel: primaryWindow?.level ?? .warning,
+                secondaryLabel: secondaryWindow?.compactLabel ?? defaultLabels.1,
+                secondaryPercent: secondaryWindow?.remainingPercent ?? 0,
+                secondaryText: secondaryWindow.map { "\($0.remainingPercent)" } ?? "--",
+                secondaryLevel: secondaryWindow?.level ?? .warning
+            )
         }
+    }
 
-        if viewModel.showCodex, let codex = viewModel.codexUsage, codex.error == nil, !codex.windows.isEmpty {
-            parts.append(MenuBarPart(
-                label: "CX",
-                badgeColor: NSColor(red: 0.07, green: 0.60, blue: 0.52, alpha: 1.0), // OpenAI teal
-                fiveHourPercent: codex.fiveHourWindow?.remainingPercent ?? 0,
-                fiveHourLevel: codex.fiveHourWindow?.level ?? .normal,
-                weeklyPercent: codex.weeklyWindow?.remainingPercent ?? 0,
-                weeklyLevel: codex.weeklyWindow?.level ?? .normal
-            ))
+    private static func shouldDisplayInMenuBar(_ usage: ServiceUsage) -> Bool {
+        usage.error == nil || usage.shortLabel == "W"
+    }
+
+    private static func defaultBadgeColor(for shortLabel: String) -> NSColor {
+        switch shortLabel {
+        case "CC":
+            return NSColor(red: 0.45, green: 0.27, blue: 0.80, alpha: 1.0)
+        case "CX":
+            return NSColor(red: 0.07, green: 0.60, blue: 0.52, alpha: 1.0)
+        case "W":
+            return NSColor(red: 0.0, green: 0.47, blue: 0.84, alpha: 1.0)
+        default:
+            return .controlAccentColor
         }
-
-        return parts
     }
 
     private func colorForLevel(_ level: UsageLevel) -> NSColor {
@@ -102,6 +150,10 @@ struct MenuBarLabel: View {
         case .warning: return NSColor.systemYellow
         case .normal: return NSColor.systemGreen
         }
+    }
+
+    private func colorForDisplay(_ text: String, level: UsageLevel) -> NSColor {
+        text == "--" ? NSColor.secondaryLabelColor : colorForLevel(level)
     }
 
     private func renderAttributedString(_ attrString: NSAttributedString) -> NSImage {

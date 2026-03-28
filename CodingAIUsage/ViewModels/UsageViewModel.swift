@@ -6,11 +6,13 @@ import ServiceManagement
 final class UsageViewModel: ObservableObject {
     @Published var claudeUsage: ServiceUsage?
     @Published var codexUsage: ServiceUsage?
+    @Published var windsurfUsage: ServiceUsage?
     @Published var errors: [String] = []
     @Published var isRefreshing = false
 
     @AppStorage("showClaude") var showClaude = true
     @AppStorage("showCodex") var showCodex = true
+    @AppStorage("showWindsurf") var showWindsurf = true
     @AppStorage("pollingIntervalSeconds") var pollingIntervalSeconds: Double = 300
     @AppStorage("alertThreshold") var alertThreshold: Double = 0.10
     @AppStorage("launchAtLogin") var launchAtLogin = false {
@@ -19,6 +21,7 @@ final class UsageViewModel: ObservableObject {
 
     private let claudeService = ClaudeUsageService()
     private let codexService = CodexUsageService()
+    private let windsurfService = WindsurfUsageService()
     private let notificationService = NotificationService()
     let scheduler = PollingScheduler()
 
@@ -27,6 +30,8 @@ final class UsageViewModel: ObservableObject {
     @Published var claudeLoggedIn = false
     @Published var codexInstalled = false
     @Published var codexLoggedIn = false
+    @Published var windsurfInstalled = false
+    @Published var windsurfLoggedIn = false
     private var prerequisitesChecked = false
 
     init() {
@@ -49,7 +54,7 @@ final class UsageViewModel: ObservableObject {
         scheduler.stop()
     }
 
-    func refresh() async {
+    func refresh(forceLiveWindsurf: Bool = false) async {
         isRefreshing = true
         errors.removeAll()
 
@@ -60,7 +65,8 @@ final class UsageViewModel: ObservableObject {
 
         async let claudeResult: Void = fetchClaude()
         async let codexResult: Void = fetchCodex()
-        _ = await (claudeResult, codexResult)
+        async let windsurfResult: Void = fetchWindsurf(preferLiveRefresh: forceLiveWindsurf)
+        _ = await (claudeResult, codexResult, windsurfResult)
 
         isRefreshing = false
     }
@@ -69,7 +75,7 @@ final class UsageViewModel: ObservableObject {
         scheduler.resetBackoff()
         prerequisitesChecked = false // Re-check on manual refresh
         Task {
-            await refresh()
+            await refresh(forceLiveWindsurf: true)
         }
     }
 
@@ -90,9 +96,14 @@ final class UsageViewModel: ObservableObject {
         }
 
         if showCodex, let codex = codexUsage, codex.error == nil, !codex.windows.isEmpty {
-            let fh = codex.fiveHourWindow?.remainingPercent ?? 0
-            let w = codex.weeklyWindow?.remainingPercent ?? 0
-            parts.append("CX 5h% \(fh) | w% \(w)")
+            let primary = codex.primaryWindow?.remainingPercent ?? 0
+            let secondary = codex.secondaryWindow?.remainingPercent ?? 0
+            parts.append("CX 5h% \(primary) | w% \(secondary)")
+        }
+
+        if showWindsurf, let windsurf = windsurfUsage, windsurf.error == nil,
+           let daily = windsurf.primaryWindow, let weekly = windsurf.secondaryWindow {
+            parts.append("W \(daily.compactLabel)% \(daily.remainingPercent) | \(weekly.compactLabel)% \(weekly.remainingPercent)")
         }
 
         if parts.isEmpty {
@@ -103,7 +114,7 @@ final class UsageViewModel: ObservableObject {
     }
 
     var lastUpdated: Date? {
-        [claudeUsage?.lastUpdated, codexUsage?.lastUpdated]
+        [claudeUsage?.lastUpdated, codexUsage?.lastUpdated, windsurfUsage?.lastUpdated]
             .compactMap { $0 }
             .max()
     }
@@ -119,7 +130,7 @@ final class UsageViewModel: ObservableObject {
     }
 
     var worstLevel: UsageLevel {
-        let levels = [claudeUsage?.worstLevel, codexUsage?.worstLevel].compactMap { $0 }
+        let levels = [claudeUsage?.worstLevel, codexUsage?.worstLevel, windsurfUsage?.worstLevel].compactMap { $0 }
         return levels.max() ?? .normal
     }
 
@@ -127,18 +138,62 @@ final class UsageViewModel: ObservableObject {
         worstLevel == .critical
     }
 
+    var enabledServicesSummary: String {
+        let services = [
+            (showClaude, "Claude Code"),
+            (showCodex, "Codex"),
+            (showWindsurf, "Windsurf")
+        ]
+            .filter(\.0)
+            .map(\.1)
+
+        if services.isEmpty {
+            return "Enabled: None"
+        }
+
+        return "Enabled: " + services.joined(separator: ", ")
+    }
+
+    var globalErrors: [String] {
+        Self.filteredGlobalErrors(
+            allErrors: errors,
+            services: [claudeUsage, codexUsage, windsurfUsage].compactMap { $0 }
+        )
+    }
+
     // MARK: - Private
+
+    nonisolated static func filteredGlobalErrors(allErrors: [String], services: [ServiceUsage]) -> [String] {
+        let serviceErrors = Set(services.compactMap(\.error))
+        return allErrors.filter { !serviceErrors.contains($0) }
+    }
+
+    nonisolated static func windsurfFailureUsage(message: String, previous: ServiceUsage?) -> ServiceUsage {
+        ServiceUsage(
+            id: previous?.id ?? "windsurf",
+            displayName: previous?.displayName ?? "Windsurf",
+            shortLabel: previous?.shortLabel ?? "W",
+            windows: [],
+            lastUpdated: Date(),
+            error: message,
+            footerLines: []
+        )
+    }
 
     private func checkPrerequisitesAsync() async {
         let ci = await claudeService.checkInstalled()
         let cxi = await codexService.checkInstalled()
         let cl = KeychainService().isClaudeLoggedIn()
         let cxl = await codexService.isLoggedIn()
+        let wi = await windsurfService.checkInstalled()
+        let wl = await windsurfService.isLoggedIn()
 
         claudeInstalled = ci
         claudeLoggedIn = cl
         codexInstalled = cxi
         codexLoggedIn = cxl
+        windsurfInstalled = wi
+        windsurfLoggedIn = wl
 
         if showClaude {
             if !ci { errors.append("Claude Code not installed") }
@@ -147,6 +202,10 @@ final class UsageViewModel: ObservableObject {
         if showCodex {
             if !cxi { errors.append("Codex not installed") }
             else if !cxl { errors.append("Codex: not logged in") }
+        }
+        if showWindsurf {
+            if !wi { errors.append("Windsurf not installed") }
+            else if !wl { errors.append("Windsurf: not logged in") }
         }
     }
 
@@ -210,6 +269,38 @@ final class UsageViewModel: ObservableObject {
             errors.append("Codex: unexpected API response format")
         } catch {
             errors.append("Codex: \(error.localizedDescription)")
+        }
+    }
+
+    private func fetchWindsurf(preferLiveRefresh: Bool = false) async {
+        guard showWindsurf else {
+            windsurfUsage = nil
+            return
+        }
+        guard windsurfInstalled, windsurfLoggedIn else { return }
+
+        do {
+            let usage = try await windsurfService.fetchUsage(preferLiveRefresh: preferLiveRefresh)
+            windsurfUsage = usage
+            if let error = usage.error {
+                errors.append(error)
+            } else {
+                notificationService.checkAndNotify(service: usage, threshold: alertThreshold)
+            }
+        } catch let error as UsageError {
+            errors.append(error.localizedDescription)
+            windsurfUsage = Self.windsurfFailureUsage(
+                message: error.localizedDescription,
+                previous: windsurfUsage
+            )
+        } catch is DecodingError {
+            let message = "Windsurf: unexpected local state format"
+            errors.append(message)
+            windsurfUsage = Self.windsurfFailureUsage(message: message, previous: windsurfUsage)
+        } catch {
+            let message = "Windsurf: \(error.localizedDescription)"
+            errors.append(message)
+            windsurfUsage = Self.windsurfFailureUsage(message: message, previous: windsurfUsage)
         }
     }
 

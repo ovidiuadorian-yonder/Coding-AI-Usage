@@ -10,10 +10,16 @@ let package = Package(
             path: "CodingAIUsage",
             exclude: ["Info.plist"],
             linkerSettings: [
+                .linkedLibrary("sqlite3"),
                 .linkedFramework("Security"),
                 .linkedFramework("UserNotifications"),
-                .linkedFramework("ServiceManagement")
+                .linkedFramework("ServiceManagement"),
+                .linkedFramework("WebKit")
             ]
+        ),
+        .testTarget(
+            name: "CodingAIUsageTests",
+            dependencies: ["CodingAIUsage"]
         )
     ]
 )
