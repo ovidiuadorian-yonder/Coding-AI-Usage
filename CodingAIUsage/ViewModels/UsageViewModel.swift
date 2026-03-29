@@ -23,16 +23,19 @@ final class UsageViewModel: ObservableObject {
     private let codexService = CodexUsageService()
     private let windsurfService = WindsurfUsageService()
     private let notificationService = NotificationService()
+    private let claudeAuthLauncher = ClaudeAuthLauncher()
     let scheduler = PollingScheduler()
 
-    // Status checks (cached - only re-checked on manual refresh)
+    // Status checks (re-checked every 10 min, on wake, on manual refresh, and on auth errors)
     @Published var claudeInstalled = false
     @Published var claudeLoggedIn = false
     @Published var codexInstalled = false
     @Published var codexLoggedIn = false
     @Published var windsurfInstalled = false
     @Published var windsurfLoggedIn = false
-    private var prerequisitesChecked = false
+    private var lastPrerequisitesCheck: Date?
+    private let prerequisitesCheckInterval: TimeInterval = 600 // Re-check every 10 min
+    private var lastClaudeTokenHash: Int?
 
     init() {
         notificationService.requestPermission()
@@ -40,6 +43,18 @@ final class UsageViewModel: ObservableObject {
         Task { @MainActor in
             await checkPrerequisitesAsync()
             startPolling()
+        }
+        // Force refresh on wake from sleep — token may have been rotated
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.scheduler.resetBackoff()
+                self.lastPrerequisitesCheck = nil
+                await self.refresh()
+            }
         }
     }
 
@@ -58,9 +73,11 @@ final class UsageViewModel: ObservableObject {
         isRefreshing = true
         errors.removeAll()
 
-        if !prerequisitesChecked {
+        let needsPrereqCheck = lastPrerequisitesCheck == nil ||
+            Date().timeIntervalSince(lastPrerequisitesCheck!) > prerequisitesCheckInterval
+        if needsPrereqCheck {
             await checkPrerequisitesAsync()
-            prerequisitesChecked = true
+            lastPrerequisitesCheck = Date()
         }
 
         async let claudeResult: Void = fetchClaude()
@@ -73,7 +90,7 @@ final class UsageViewModel: ObservableObject {
 
     func manualRefresh() {
         scheduler.resetBackoff()
-        prerequisitesChecked = false // Re-check on manual refresh
+        lastPrerequisitesCheck = nil // Re-check on manual refresh
         Task {
             await refresh(forceLiveWindsurf: true)
         }
@@ -82,6 +99,15 @@ final class UsageViewModel: ObservableObject {
     func updatePollingInterval(_ seconds: Double) {
         pollingIntervalSeconds = seconds
         scheduler.updateBaseInterval(seconds)
+    }
+
+    func reauthenticateClaude() {
+        KeychainService().invalidateClaudeOAuthTokenCache()
+        do {
+            try claudeAuthLauncher.launchReauthentication()
+        } catch {
+            errors.append("Claude Code: unable to launch re-auth flow (\(error.localizedDescription))")
+        }
     }
 
     // MARK: - Menu Bar Text
@@ -168,6 +194,11 @@ final class UsageViewModel: ObservableObject {
         return allErrors.filter { !serviceErrors.contains($0) }
     }
 
+    nonisolated static func retryingFetchUsage(previous: ServiceUsage?) -> ServiceUsage? {
+        guard let previous, previous.error != nil else { return previous }
+        return nil
+    }
+
     nonisolated static func windsurfFailureUsage(message: String, previous: ServiceUsage?) -> ServiceUsage {
         ServiceUsage(
             id: previous?.id ?? "windsurf",
@@ -215,6 +246,14 @@ final class UsageViewModel: ObservableObject {
             return
         }
         guard claudeInstalled, claudeLoggedIn else { return }
+        claudeUsage = Self.retryingFetchUsage(previous: claudeUsage)
+
+        // Use the cached token hash so refreshes do not keep re-triggering Keychain prompts.
+        let currentTokenHash = KeychainService().getClaudeOAuthToken()?.hashValue
+        if let last = lastClaudeTokenHash, let current = currentTokenHash, last != current {
+            scheduler.resetBackoff()
+        }
+        lastClaudeTokenHash = currentTokenHash
 
         do {
             let usage = try await claudeService.fetchUsage()
@@ -227,6 +266,15 @@ final class UsageViewModel: ObservableObject {
                 scheduler.reportRateLimited(retryAfter: retryAfter)
                 let retryText = retryAfter.map { " (retry in \(Int($0))s)" } ?? ""
                 errors.append("Claude Code: rate limited\(retryText) - will retry automatically")
+            case .authExpired:
+                KeychainService().invalidateClaudeOAuthTokenCache()
+                scheduler.resetBackoff()
+                lastPrerequisitesCheck = nil // Force re-check login status next poll
+                errors.append(error.localizedDescription)
+                claudeUsage = ServiceUsage(
+                    id: "claude", displayName: "Claude Code", shortLabel: "CC",
+                    windows: [], lastUpdated: Date(), error: error.localizedDescription
+                )
             default:
                 errors.append(error.localizedDescription)
                 claudeUsage = ServiceUsage(
@@ -247,6 +295,7 @@ final class UsageViewModel: ObservableObject {
             return
         }
         guard codexInstalled, codexLoggedIn else { return }
+        codexUsage = Self.retryingFetchUsage(previous: codexUsage)
 
         do {
             let usage = try await codexService.fetchUsage()
@@ -258,6 +307,14 @@ final class UsageViewModel: ObservableObject {
                 scheduler.reportRateLimited(retryAfter: retryAfter)
                 let retryText = retryAfter.map { " (retry in \(Int($0))s)" } ?? ""
                 errors.append("Codex: rate limited\(retryText) - will retry automatically")
+            case .authExpired:
+                scheduler.resetBackoff()
+                lastPrerequisitesCheck = nil
+                errors.append(error.localizedDescription)
+                codexUsage = ServiceUsage(
+                    id: "codex", displayName: "Codex", shortLabel: "CX",
+                    windows: [], lastUpdated: Date(), error: error.localizedDescription
+                )
             default:
                 errors.append(error.localizedDescription)
                 codexUsage = ServiceUsage(

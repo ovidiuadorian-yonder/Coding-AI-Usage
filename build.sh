@@ -1,5 +1,8 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}"
 
 echo "Building Coding AI Usage..."
 
@@ -29,9 +32,5 @@ cp Assets/Icon/AppIcon.icns "${RESOURCES}/AppIcon.icns"
 echo ""
 echo "Build complete: ${APP_BUNDLE}"
 echo ""
-echo "To run:"
-echo "  open \"${APP_BUNDLE}\""
-echo ""
-echo "To install:"
-echo "  cp -r \"${APP_BUNDLE}\" /Applications/"
-echo "  open /Applications/\"${APP_BUNDLE}\""
+echo "Bundle ready: ${APP_BUNDLE}"
+echo "Use ./deploy.sh to install it to /Applications and launch it."

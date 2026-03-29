@@ -2,11 +2,14 @@ import SwiftUI
 
 struct ServiceRowView: View {
     let usage: ServiceUsage
+    var showsTitle = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(usage.displayName)
-                .font(.headline)
+            if showsTitle {
+                Text(usage.displayName)
+                    .font(.headline)
+            }
 
             if let error = usage.error {
                 Text(error)

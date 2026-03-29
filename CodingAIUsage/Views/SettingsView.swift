@@ -2,7 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var viewModel: UsageViewModel
-    @Environment(\.dismiss) private var dismiss
+    let onDone: () -> Void
 
     private let pollingOptions: [(String, Double)] = [
         ("3 minutes", 180),
@@ -63,8 +63,25 @@ struct SettingsView: View {
 
             // Launch at login
             GroupBox("General") {
-                Toggle("Launch at Login", isOn: $viewModel.launchAtLogin)
-                    .padding(.vertical, 4)
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Launch at Login", isOn: $viewModel.launchAtLogin)
+
+                    if viewModel.showClaude {
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Button("Re-login Claude Code") {
+                                reauthenticateClaude()
+                            }
+
+                            Text("Opens Terminal and starts `claude auth logout` followed by `claude auth login`.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
             }
 
             // Remark
@@ -75,11 +92,15 @@ struct SettingsView: View {
 
             HStack {
                 Spacer()
-                Button("Done") { dismiss() }
+                Button("Done") { onDone() }
                     .keyboardShortcut(.defaultAction)
             }
         }
         .padding()
         .frame(width: 380)
+    }
+
+    private func reauthenticateClaude() {
+        viewModel.reauthenticateClaude()
     }
 }

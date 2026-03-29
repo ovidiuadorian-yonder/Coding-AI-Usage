@@ -2,8 +2,42 @@ import Foundation
 import Security
 
 final class KeychainService {
+    private static let cacheLock = NSLock()
+    private static var cachedClaudeOAuthToken: String?
 
-    func getClaudeOAuthToken() -> String? {
+    private let claudeTokenReader: () -> String?
+
+    init(claudeTokenReader: @escaping () -> String? = KeychainService.readClaudeOAuthTokenFromKeychain) {
+        self.claudeTokenReader = claudeTokenReader
+    }
+
+    func getClaudeOAuthToken(forceRefresh: Bool = false) -> String? {
+        if !forceRefresh, let cachedToken = Self.withClaudeTokenCache({ Self.cachedClaudeOAuthToken }) {
+            return cachedToken
+        }
+
+        let token = claudeTokenReader()
+        if let token {
+            Self.withClaudeTokenCache {
+                Self.cachedClaudeOAuthToken = token
+            }
+        }
+        return token
+    }
+
+    func invalidateClaudeOAuthTokenCache() {
+        Self.withClaudeTokenCache {
+            Self.cachedClaudeOAuthToken = nil
+        }
+    }
+
+    static func resetClaudeOAuthTokenCacheForTests() {
+        withClaudeTokenCache {
+            cachedClaudeOAuthToken = nil
+        }
+    }
+
+    private static func readClaudeOAuthTokenFromKeychain() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
@@ -27,7 +61,13 @@ final class KeychainService {
         return token
     }
 
-    func isClaudeLoggedIn() -> Bool {
-        getClaudeOAuthToken() != nil
+    private static func withClaudeTokenCache<T>(_ body: () -> T) -> T {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return body()
+    }
+
+    func isClaudeLoggedIn(forceRefresh: Bool = false) -> Bool {
+        getClaudeOAuthToken(forceRefresh: forceRefresh) != nil
     }
 }

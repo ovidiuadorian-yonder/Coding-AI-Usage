@@ -72,25 +72,24 @@ For Windsurf, open the app and sign in normally. The app reads Windsurf's local 
 git clone https://github.com/ovidiuadorian-yonder/Coding-AI-Usage.git
 cd Coding-AI-Usage
 
-# 2. Build the app
-chmod +x build.sh
-./build.sh
-
-# 3. Run it
-open "Coding AI Usage.app"
+# 2. Build, install, and launch the app
+chmod +x deploy.sh
+./deploy.sh
 ```
 
 That's it! You should see `CC 5h% ... | w% ...  CX 5h% ... | w% ...  W d% ... | w% ...` appear in your menu bar within a few seconds.
 
+If you need more granular control, `./build.sh` only creates the local `.app` bundle without installing or launching it.
+
 ### Install to Applications (Optional)
 
-To keep it permanently and have it available in Launchpad:
+`./deploy.sh` already installs the app into `/Applications` and launches it.
+
+If you only want the raw `.app` bundle without installing it, use:
 
 ```bash
-cp -r "Coding AI Usage.app" /Applications/
+./build.sh
 ```
-
-Then launch it from `/Applications` or Spotlight.
 
 ### Uninstall
 
@@ -223,9 +222,14 @@ The app is **not sandboxed** by design. It needs cross-app Keychain access and f
 # Debug build (faster, for development)
 swift build
 
-# Release build + app bundle (for distribution)
+# Release build + app bundle only
 ./build.sh
+
+# Release build + install to /Applications + launch
+./deploy.sh
 ```
+
+Use `./build.sh` when you want the bundle only and prefer to handle install, copy, signing, or launch steps yourself.
 
 ### Project Structure
 

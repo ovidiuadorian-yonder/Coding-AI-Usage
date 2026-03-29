@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct AboutView: View {
-    @Environment(\.dismiss) private var dismiss
+    let onClose: () -> Void
 
     var body: some View {
         VStack(spacing: 16) {
@@ -33,7 +33,7 @@ struct AboutView: View {
                     .font(.headline)
             }
 
-            Button("Close") { dismiss() }
+            Button("Close") { onClose() }
                 .keyboardShortcut(.defaultAction)
         }
         .padding(24)

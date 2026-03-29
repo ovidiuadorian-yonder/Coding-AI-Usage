@@ -1,13 +1,34 @@
 import SwiftUI
 
 struct UsageDetailView: View {
+    private enum ActivePanel {
+        case main
+        case settings
+        case about
+    }
+
     @ObservedObject var viewModel: UsageViewModel
-    @State private var showSettings = false
-    @State private var showAbout = false
+    @State private var activePanel: ActivePanel = .main
 
     var body: some View {
+        Group {
+            switch activePanel {
+            case .main:
+                mainPanel
+            case .settings:
+                SettingsView(viewModel: viewModel) {
+                    activePanel = .main
+                }
+            case .about:
+                AboutView {
+                    activePanel = .main
+                }
+            }
+        }
+    }
+
+    private var mainPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Header
             HStack {
                 Text("Coding AI Usage")
                     .font(.title3.bold())
@@ -16,21 +37,25 @@ struct UsageDetailView: View {
                     ProgressView()
                         .scaleEffect(0.7)
                 }
+                Button(action: { activePanel = .about }) {
+                    Image(systemName: "info.circle")
+                }
+                .buttonStyle(.borderless)
             }
 
             Divider()
 
             // Service usage details
             if let claude = viewModel.claudeUsage, viewModel.showClaude {
-                ServiceRowView(usage: claude)
+                serviceSection(for: claude)
             }
 
             if let codex = viewModel.codexUsage, viewModel.showCodex {
-                ServiceRowView(usage: codex)
+                serviceSection(for: codex)
             }
 
             if let windsurf = viewModel.windsurfUsage, viewModel.showWindsurf {
-                ServiceRowView(usage: windsurf)
+                serviceSection(for: windsurf)
             }
 
             if !viewModel.showClaude && !viewModel.showCodex && !viewModel.showWindsurf {
@@ -67,12 +92,8 @@ struct UsageDetailView: View {
 
                 Spacer()
 
-                Button(action: { showSettings = true }) {
+                Button(action: { activePanel = .settings }) {
                     Label("Settings", systemImage: "gear")
-                }
-
-                Button(action: { showAbout = true }) {
-                    Label("About", systemImage: "info.circle")
                 }
 
                 Button(action: { NSApplication.shared.terminate(nil) }) {
@@ -83,11 +104,11 @@ struct UsageDetailView: View {
         }
         .padding()
         .frame(width: 320)
-        .sheet(isPresented: $showSettings) {
-            SettingsView(viewModel: viewModel)
-        }
-        .sheet(isPresented: $showAbout) {
-            AboutView()
+    }
+
+    private func serviceSection(for usage: ServiceUsage) -> some View {
+        GroupBox(usage.displayName) {
+            ServiceRowView(usage: usage, showsTitle: false)
         }
     }
 }

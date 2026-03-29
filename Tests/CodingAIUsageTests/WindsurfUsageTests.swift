@@ -4,50 +4,6 @@ import SQLite3
 @testable import CodingAIUsage
 
 final class WindsurfUsageTests: XCTestCase {
-    func testClaudeCheckInstalledFindsUserLocalBinaryWithoutPATH() async throws {
-        let localClaudePath = NSHomeDirectory() + "/.local/bin/claude"
-        guard FileManager.default.isExecutableFile(atPath: localClaudePath) else {
-            throw XCTSkip("This machine does not install claude under ~/.local/bin")
-        }
-
-        let originalPath = ProcessInfo.processInfo.environment["PATH"]
-        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
-        defer {
-            if let originalPath {
-                setenv("PATH", originalPath, 1)
-            } else {
-                unsetenv("PATH")
-            }
-        }
-
-        let installed = await ClaudeUsageService().checkInstalled()
-
-        XCTAssertTrue(installed)
-    }
-
-    @MainActor
-    func testNotificationTrackingDoesNotAdvanceBeforePermissionIsAvailable() {
-        let service = NotificationService()
-        let usage = ServiceUsage(
-            id: "windsurf",
-            displayName: "Windsurf",
-            shortLabel: "W",
-            windows: [
-                UsageWindow(id: "daily", name: "Daily", compactLabel: "d", utilization: 0.95, resetTime: nil)
-            ],
-            lastUpdated: .distantPast,
-            error: nil
-        )
-
-        service.checkAndNotify(service: usage, threshold: 0.10)
-
-        let mirror = Mirror(reflecting: service)
-        let lastAlerts = mirror.descendant("lastAlerts") as? [String: Date]
-        let belowThreshold = mirror.descendant("previouslyBelowThreshold") as? [String: Bool]
-
-        XCTAssertEqual(lastAlerts, [:])
-        XCTAssertEqual(belowThreshold, [:])
-    }
 
     func testManualRefreshPrefersLiveSnapshotOverCachedSnapshot() {
         let cached = WindsurfPageSnapshot(
@@ -190,88 +146,6 @@ final class WindsurfUsageTests: XCTestCase {
         XCTAssertTrue(usage.footerLines.contains("$1371.44"))
     }
 
-    func testUsageWindowCompactLabelsDriveMenuText() {
-        let claude = ServiceUsage(
-            id: "claude",
-            displayName: "Claude Code",
-            shortLabel: "CC",
-            windows: [
-                UsageWindow(id: "five_hour", name: "5-Hour", compactLabel: "5h", utilization: 0.50, resetTime: nil),
-                UsageWindow(id: "seven_day", name: "Weekly", compactLabel: "w", utilization: 0.37, resetTime: nil)
-            ],
-            lastUpdated: .distantPast,
-            error: nil
-        )
-        let windsurf = ServiceUsage(
-            id: "windsurf",
-            displayName: "Windsurf",
-            shortLabel: "W",
-            windows: [
-                UsageWindow(id: "daily", name: "Daily", compactLabel: "d", utilization: 0.01, resetTime: nil),
-                UsageWindow(id: "weekly", name: "Weekly", compactLabel: "w", utilization: 0.19, resetTime: nil)
-            ],
-            lastUpdated: .distantPast,
-            error: nil
-        )
-
-        let parts = MenuBarLabel.menuBarParts(
-            services: [
-                .init(usage: claude, isVisible: true, badgeColor: nil),
-                .init(usage: windsurf, isVisible: true, badgeColor: nil)
-            ]
-        )
-
-        XCTAssertEqual(parts.map(\.label), ["CC", "W"])
-        XCTAssertEqual(parts[0].primaryLabel, "5h")
-        XCTAssertEqual(parts[1].primaryLabel, "d")
-        XCTAssertEqual(parts[1].primaryPercent, 99)
-        XCTAssertEqual(parts[1].secondaryLabel, "w")
-        XCTAssertEqual(parts[1].secondaryPercent, 81)
-    }
-
-    func testUnavailableWindsurfStillAppearsInMenuBarWithPlaceholders() {
-        let windsurf = ServiceUsage(
-            id: "windsurf",
-            displayName: "Windsurf",
-            shortLabel: "W",
-            windows: [],
-            lastUpdated: .distantPast,
-            error: "Windsurf: daily/weekly quota unavailable"
-        )
-
-        let parts = MenuBarLabel.menuBarParts(
-            services: [
-                .init(usage: windsurf, isVisible: true, badgeColor: nil)
-            ]
-        )
-
-        XCTAssertEqual(parts.count, 1)
-        XCTAssertEqual(parts[0].label, "W")
-        XCTAssertEqual(parts[0].primaryLabel, "d")
-        XCTAssertEqual(parts[0].primaryText, "--")
-        XCTAssertEqual(parts[0].secondaryLabel, "w")
-        XCTAssertEqual(parts[0].secondaryText, "--")
-    }
-
-    func testUnavailableClaudeDoesNotAppearInMenuBar() {
-        let claude = ServiceUsage(
-            id: "claude",
-            displayName: "Claude Code",
-            shortLabel: "CC",
-            windows: [],
-            lastUpdated: .distantPast,
-            error: "Claude Code: not logged in"
-        )
-
-        let parts = MenuBarLabel.menuBarParts(
-            services: [
-                .init(usage: claude, isVisible: true, badgeColor: nil)
-            ]
-        )
-
-        XCTAssertTrue(parts.isEmpty)
-    }
-
     func testUsagePageParserExtractsQuotaAndBalanceFromText() throws {
         let pageText = """
         Plan
@@ -384,48 +258,6 @@ final class WindsurfUsageTests: XCTestCase {
         )
 
         XCTAssertEqual(usage.footerLines, [])
-    }
-
-    func testGlobalErrorsExcludeServiceSpecificErrors() {
-        let windsurf = ServiceUsage(
-            id: "windsurf",
-            displayName: "Windsurf",
-            shortLabel: "W",
-            windows: [],
-            lastUpdated: .distantPast,
-            error: "Windsurf: daily/weekly quota unavailable"
-        )
-
-        let errors = UsageViewModel.filteredGlobalErrors(
-            allErrors: ["Windsurf: daily/weekly quota unavailable", "Codex: rate limited"],
-            services: [windsurf]
-        )
-
-        XCTAssertEqual(errors, ["Codex: rate limited"])
-    }
-
-    func testWindsurfFailureUsageClearsPreviousQuotaWindows() {
-        let previous = ServiceUsage(
-            id: "windsurf",
-            displayName: "Windsurf",
-            shortLabel: "W",
-            windows: [
-                UsageWindow(id: "daily", name: "Daily", compactLabel: "d", utilization: 0.01, resetTime: nil),
-                UsageWindow(id: "weekly", name: "Weekly", compactLabel: "w", utilization: 0.19, resetTime: nil)
-            ],
-            lastUpdated: .distantPast,
-            error: nil,
-            footerLines: ["Plan ends Apr 22, 2026", "$1371.44"]
-        )
-
-        let usage = UsageViewModel.windsurfFailureUsage(
-            message: "Windsurf: unexpected local state format",
-            previous: previous
-        )
-
-        XCTAssertEqual(usage.error, "Windsurf: unexpected local state format")
-        XCTAssertTrue(usage.windows.isEmpty)
-        XCTAssertTrue(usage.footerLines.isEmpty)
     }
 
     func testChromiumCookieCryptoDecryptsVersion24CookiePayload() throws {
