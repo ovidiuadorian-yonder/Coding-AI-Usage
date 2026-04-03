@@ -1,0 +1,32 @@
+# Suggested commands
+- Install/build prerequisites check:
+- `xcode-select -p`
+- `which claude`
+- `which codex`
+- `ls /Applications/Windsurf.app`
+- Debug/test build:
+- `swift build`
+- Run all tests:
+- `swift test`
+- Run one test or test case:
+- `swift test --filter ClaudeCredentialLoaderTests`
+- `swift test --filter ClaudeCredentialLoaderTests/testWritingKeychainCredentialsDoesNotLeakJSONToCommandRunner`
+- Build release app bundle locally:
+- `./build.sh`
+- Install to `/Applications` and launch:
+- `./deploy.sh`
+- Launch an already built local app bundle:
+- `open "Coding AI Usage.app"`
+- Launch installed app:
+- `open "/Applications/Coding AI Usage.app"`
+- Remove installed app:
+- `rm -rf "/Applications/Coding AI Usage.app"`
+- Clear app defaults/preferences:
+- `defaults delete com.ovidiuadorian.CodingAIUsage`
+- Useful repo commands on Darwin/macOS:
+- `git status --short`
+- `git diff`
+- `rg <pattern> CodingAIUsage Tests`
+- `find . -maxdepth 3 -type f | sort`
+- `sed -n '1,200p' <file>`
+- If concurrent SwiftPM module cache issues appear in agent sessions, use a per-run module cache, e.g. `CLANG_MODULE_CACHE_PATH=$PWD/.build/ModuleCache-local swift test`.

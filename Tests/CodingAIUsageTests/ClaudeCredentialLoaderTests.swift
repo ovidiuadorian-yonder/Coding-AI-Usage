@@ -14,13 +14,9 @@ final class ClaudeCredentialLoaderTests: XCTestCase {
         try fileJSON.write(toFile: filePath, atomically: true, encoding: .utf8)
 
         let keychain = KeychainService(
-            commandRunner: { args in
-                if args.contains("find-generic-password") {
-                    return .init(exitCode: 0, standardOutput: self.credentialsJSON(accessToken: "keychain-token"), standardError: "")
-                }
-                return .init(exitCode: 44, standardOutput: "", standardError: "")
-            },
-            currentUsername: { "tester" }
+            currentUsername: { "tester" },
+            credentialReader: { _, _ in self.credentialsJSON(accessToken: "keychain-token") },
+            hashedServiceNameFinder: { "Claude Code-credentials" }
         )
 
         let loader = ClaudeCredentialLoader(
@@ -38,30 +34,37 @@ final class ClaudeCredentialLoaderTests: XCTestCase {
     func testHashedKeychainServiceNameIsResolvedWhenLegacyEntryIsMissing() throws {
         var seenHashedLookup = false
         let service = KeychainService(
-            commandRunner: { args in
-                if args == ["find-generic-password", "-s", "Claude Code-credentials", "-a", "tester"] {
-                    return .init(exitCode: 44, standardOutput: "", standardError: "")
-                }
-                if args == ["dump-keychain"] {
-                    return .init(
-                        exitCode: 0,
-                        standardOutput: "\"svce\"<blob>=\"Claude Code-credentials-abc123\"\n",
-                        standardError: ""
-                    )
-                }
-                if args == ["find-generic-password", "-s", "Claude Code-credentials-abc123", "-a", "tester", "-w"] {
-                    seenHashedLookup = true
-                    return .init(exitCode: 0, standardOutput: self.credentialsJSON(accessToken: "hashed-token"), standardError: "")
-                }
-                return .init(exitCode: 44, standardOutput: "", standardError: "")
+            currentUsername: { "tester" },
+            credentialReader: { serviceName, _ in
+                guard serviceName == "Claude Code-credentials-abc123" else { return nil }
+                seenHashedLookup = true
+                return self.credentialsJSON(accessToken: "hashed-token")
             },
-            currentUsername: { "tester" }
+            hashedServiceNameFinder: { "Claude Code-credentials-abc123" }
         )
 
         let result = try service.readClaudeCredentialsJSON()
 
         XCTAssertTrue(seenHashedLookup)
         XCTAssertEqual(result, credentialsJSON(accessToken: "hashed-token"))
+    }
+
+    func testWritingKeychainCredentialsCallsCredentialWriter() throws {
+        let payload = credentialsJSON(accessToken: "fresh-token", refreshToken: "fresh-refresh")
+        var writerInput: (json: String, serviceName: String, account: String)?
+
+        let service = KeychainService(
+            currentUsername: { "tester" },
+            credentialWriter: { json, serviceName, account in
+                writerInput = (json, serviceName, account)
+            }
+        )
+
+        try service.writeClaudeCredentialsJSON(payload, serviceName: "Claude Code-credentials")
+
+        XCTAssertEqual(writerInput?.json, payload)
+        XCTAssertEqual(writerInput?.serviceName, "Claude Code-credentials")
+        XCTAssertEqual(writerInput?.account, "tester")
     }
 
     func testCredentialCacheExpiresAfterTTL() throws {

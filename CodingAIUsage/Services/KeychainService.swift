@@ -1,35 +1,38 @@
 import Foundation
-
-struct SecurityCommandResult: Equatable {
-    let exitCode: Int32
-    let standardOutput: String
-    let standardError: String
-}
+import Security
 
 final class KeychainService {
-    typealias CommandRunner = ([String]) throws -> SecurityCommandResult
+    typealias CredentialWriter = (_ json: String, _ serviceName: String, _ account: String) throws -> Void
+    typealias CredentialReader = (_ serviceName: String, _ account: String) throws -> String?
+    typealias HashedServiceNameFinder = () -> String?
     typealias UsernameProvider = () -> String
 
     static let empty = KeychainService(
-        commandRunner: { _ in
-            SecurityCommandResult(exitCode: 44, standardOutput: "", standardError: "")
-        },
-        currentUsername: { "unknown" }
+        currentUsername: { "unknown" },
+        credentialWriter: { _, _, _ in },
+        credentialReader: { _, _ in nil },
+        hashedServiceNameFinder: { nil }
     )
 
     private static let legacyServiceName = "Claude Code-credentials"
 
-    private let commandRunner: CommandRunner
     private let currentUsername: UsernameProvider
+    private let credentialWriter: CredentialWriter
+    private let credentialReader: CredentialReader
+    private let hashedServiceNameFinder: HashedServiceNameFinder
     private let lock = NSLock()
     private var cachedServiceName: String?
 
     init(
-        commandRunner: @escaping CommandRunner = KeychainService.runSecurityCommand,
-        currentUsername: @escaping UsernameProvider = NSUserName
+        currentUsername: @escaping UsernameProvider = NSUserName,
+        credentialWriter: @escaping CredentialWriter = KeychainService.writeCredentialsToKeychain,
+        credentialReader: @escaping CredentialReader = KeychainService.readCredentialFromKeychain,
+        hashedServiceNameFinder: @escaping HashedServiceNameFinder = KeychainService.findHashedClaudeServiceNameDirect
     ) {
-        self.commandRunner = commandRunner
         self.currentUsername = currentUsername
+        self.credentialWriter = credentialWriter
+        self.credentialReader = credentialReader
+        self.hashedServiceNameFinder = hashedServiceNameFinder
     }
 
     func readClaudeCredentialsJSON() throws -> String? {
@@ -37,17 +40,16 @@ final class KeychainService {
     }
 
     func writeClaudeCredentialsJSON(_ json: String, serviceName: String? = nil) throws {
-        let discoveredServiceName = try resolveClaudeServiceName()
-        let resolvedServiceName = serviceName ?? discoveredServiceName ?? Self.legacyServiceName
-        let result = try commandRunner([
-            "add-generic-password",
-            "-s", resolvedServiceName,
-            "-a", currentUsername(),
-            "-w", json,
-            "-U"
-        ])
+        let resolvedServiceName: String
+        if let serviceName {
+            resolvedServiceName = serviceName
+        } else {
+            resolvedServiceName = try resolveClaudeServiceName() ?? Self.legacyServiceName
+        }
 
-        guard result.exitCode == 0 else {
+        do {
+            try credentialWriter(json, resolvedServiceName, currentUsername())
+        } catch {
             throw UsageError.networkError("Claude Code: unable to update Keychain credentials")
         }
 
@@ -69,26 +71,11 @@ final class KeychainService {
             return nil
         }
 
-        let result = try commandRunner([
-            "find-generic-password",
-            "-s", serviceName,
-            "-a", currentUsername(),
-            "-w"
-        ])
-
-        guard result.exitCode == 0 else {
-            if result.exitCode == 44 {
-                return nil
-            }
-            throw UsageError.networkError("Claude Code: unable to read Keychain credentials")
-        }
-
-        let trimmed = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        guard let json = try credentialReader(serviceName, currentUsername()) else {
             return nil
         }
 
-        return (trimmed, serviceName)
+        return (json, serviceName)
     }
 
     private func resolveClaudeServiceName() throws -> String? {
@@ -104,7 +91,7 @@ final class KeychainService {
             return Self.legacyServiceName
         }
 
-        if let hashedServiceName = try findHashedClaudeServiceName() {
+        if let hashedServiceName = findHashedClaudeServiceName() {
             cache(serviceName: hashedServiceName)
             return hashedServiceName
         }
@@ -113,37 +100,19 @@ final class KeychainService {
     }
 
     private func keychainItemExists(serviceName: String) -> Bool {
-        do {
-            let result = try commandRunner([
-                "find-generic-password",
-                "-s", serviceName,
-                "-a", currentUsername()
-            ])
-            return result.exitCode == 0
-        } catch {
-            return false
-        }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: currentUsername(),
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: AnyObject?
+        return SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
     }
 
-    private func findHashedClaudeServiceName() throws -> String? {
-        let result = try commandRunner(["dump-keychain"])
-        guard result.exitCode == 0 else {
-            return nil
-        }
-
-        let pattern = #"Claude Code-credentials-[^"]+"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return nil
-        }
-
-        let output = result.standardOutput
-        let range = NSRange(output.startIndex..<output.endIndex, in: output)
-        guard let match = regex.firstMatch(in: output, options: [], range: range),
-              let matchRange = Range(match.range, in: output) else {
-            return nil
-        }
-
-        return String(output[matchRange]).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+    private func findHashedClaudeServiceName() -> String? {
+        hashedServiceNameFinder()
     }
 
     private func cache(serviceName: String) {
@@ -152,26 +121,83 @@ final class KeychainService {
         lock.unlock()
     }
 
-    private static func runSecurityCommand(args: [String]) throws -> SecurityCommandResult {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = args
+    private static func readCredentialFromKeychain(serviceName: String, account: String) throws -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
 
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
 
-        try process.run()
-        process.waitUntilExit()
+        switch status {
+        case errSecSuccess:
+            guard let data = result as? Data, let json = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        case errSecItemNotFound:
+            return nil
+        default:
+            throw UsageError.networkError("Claude Code: unable to read Keychain credentials")
+        }
+    }
 
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+    private static func findHashedClaudeServiceNameDirect() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
 
-        return SecurityCommandResult(
-            exitCode: process.terminationStatus,
-            standardOutput: String(decoding: outputData, as: UTF8.self),
-            standardError: String(decoding: errorData, as: UTF8.self)
-        )
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        guard status == errSecSuccess, let items = result as? [[String: Any]] else {
+            return nil
+        }
+
+        let prefix = "Claude Code-credentials-"
+        return items
+            .compactMap { $0[kSecAttrService as String] as? String }
+            .first { $0.hasPrefix(prefix) }
+    }
+
+    private static func writeCredentialsToKeychain(
+        _ json: String,
+        _ serviceName: String,
+        _ account: String
+    ) throws {
+        guard let data = json.data(using: .utf8) else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(errSecParam))
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: account
+        ]
+        let attributes: [String: Any] = [
+            kSecValueData as String: data
+        ]
+
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        switch updateStatus {
+        case errSecSuccess:
+            return
+        case errSecItemNotFound:
+            var addQuery = query
+            addQuery[kSecValueData as String] = data
+            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+            guard addStatus == errSecSuccess else {
+                throw NSError(domain: NSOSStatusErrorDomain, code: Int(addStatus))
+            }
+        default:
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(updateStatus))
+        }
     }
 }

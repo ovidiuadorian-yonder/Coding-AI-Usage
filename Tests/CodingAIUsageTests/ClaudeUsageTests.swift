@@ -86,17 +86,11 @@ final class ClaudeUsageTests: XCTestCase {
     func testClaudeUsageServicePrefersCLIWhenCredentialFileIsUnavailable() async throws {
         let loader = ClaudeCredentialLoader(
             homeDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,
-            keychainService: KeychainService(
-                commandRunner: { _ in
-                    XCTFail("Keychain should not be queried when CLI succeeds")
-                    return .init(exitCode: 44, standardOutput: "", standardError: "")
-                }
-            )
+            keychainService: KeychainService()
         )
 
         let service = ClaudeUsageService(
             credentialLoader: loader,
-            keychainService: loader.keychainService,
             networkClient: { _ in
                 XCTFail("API should not be called when CLI succeeds")
                 throw UsageError.invalidResponse
@@ -135,7 +129,6 @@ final class ClaudeUsageTests: XCTestCase {
         let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: .empty)
         let service = ClaudeUsageService(
             credentialLoader: loader,
-            keychainService: loader.keychainService,
             networkClient: { request in
                 requestRecorder.urls.append(request.url?.absoluteString ?? "")
 
@@ -178,7 +171,6 @@ final class ClaudeUsageTests: XCTestCase {
         let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: .empty)
         let service = ClaudeUsageService(
             credentialLoader: loader,
-            keychainService: loader.keychainService,
             networkClient: { request in
                 usageCalls.value += 1
 

@@ -1,0 +1,13 @@
+# Codebase structure
+- `CodingAIUsage/CodingAIUsageApp.swift`: SwiftUI `@main` entrypoint using `MenuBarExtra`.
+- `CodingAIUsage/ViewModels/UsageViewModel.swift`: main orchestration layer; polling, refresh workflow, prerequisite checks, menu bar text composition, and service coordination.
+- `CodingAIUsage/Services/`: service layer.
+- `ClaudeUsageService.swift`, `CodexUsageService.swift`, `WindsurfUsageService.swift`: fetch usage for each provider.
+- `ClaudeCredentialLoader.swift`, `KeychainService.swift`, `ClaudeCLIUsageParser.swift`, `ClaudeAuthLauncher.swift`: Claude auth/credential support.
+- `NotificationService.swift`, `PollingScheduler.swift`: app support services.
+- `CodingAIUsage/Models/`: response models and shared usage domain models.
+- `CodingAIUsage/Views/`: SwiftUI menu/dropdown/settings/about presentation.
+- `Tests/CodingAIUsageTests/`: XCTest coverage for services, view model behavior, menu bar formatting, notifications, and Windsurf parsing.
+- `build.sh`: release build plus `.app` bundle assembly.
+- `deploy.sh`: build, copy app to `/Applications`, and launch it.
+- `.serena/`: Serena project configuration for this repo.

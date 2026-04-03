@@ -97,12 +97,10 @@ final class UsageViewModelTests: XCTestCase {
         var invalidationCount = 0
         let loader = ClaudeCredentialLoader(
             homeDirectory: tempDir.path,
-            keychainService: .empty,
             onInvalidate: { invalidationCount += 1 }
         )
         let claudeService = ClaudeUsageService(
             credentialLoader: loader,
-            keychainService: loader.keychainService,
             networkClient: { request in
                 let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
                 let data = Data(#"{"five_hour":{"utilization":20,"resets_at":"2026-04-03T18:00:00.000Z"},"seven_day":{"utilization":40,"resets_at":"2026-04-08T18:00:00.000Z"}}"#.utf8)

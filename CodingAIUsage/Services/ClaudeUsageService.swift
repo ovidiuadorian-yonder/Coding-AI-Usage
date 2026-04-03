@@ -27,7 +27,6 @@ actor ClaudeUsageService {
 
     init(
         credentialLoader: ClaudeCredentialLoader = ClaudeCredentialLoader(),
-        keychainService: KeychainService? = nil,
         networkClient: @escaping NetworkClient = { request in
             try await URLSession.shared.data(for: request)
         },
