@@ -98,7 +98,7 @@ struct ServiceUsage: Identifiable {
     }
 }
 
-enum UsageError: Error, LocalizedError {
+enum UsageError: Error, LocalizedError, Equatable {
     case noCredentials(String)
     case notInstalled(String)
     case rateLimited(retryAfter: TimeInterval?)

@@ -19,12 +19,12 @@ final class UsageViewModel: ObservableObject {
         didSet { updateLaunchAtLogin() }
     }
 
-    private let claudeService = ClaudeUsageService()
-    private let codexService = CodexUsageService()
-    private let windsurfService = WindsurfUsageService()
-    private let notificationService = NotificationService()
-    private let claudeAuthLauncher = ClaudeAuthLauncher()
-    let scheduler = PollingScheduler()
+    private let claudeService: ClaudeUsageService
+    private let codexService: CodexUsageService
+    private let windsurfService: WindsurfUsageService
+    private let notificationService: NotificationService
+    private let claudeAuthLauncher: ClaudeAuthLauncher
+    let scheduler: PollingScheduler
 
     // Status checks (re-checked every 10 min, on wake, on manual refresh, and on auth errors)
     @Published var claudeInstalled = false
@@ -35,26 +35,49 @@ final class UsageViewModel: ObservableObject {
     @Published var windsurfLoggedIn = false
     private var lastPrerequisitesCheck: Date?
     private let prerequisitesCheckInterval: TimeInterval = 600 // Re-check every 10 min
-    private var lastClaudeTokenHash: Int?
+    private var wakeObserver: NSObjectProtocol?
 
-    init() {
-        notificationService.requestPermission()
-        // Start polling after a short delay to let prerequisites check complete
+    init(
+        claudeService: ClaudeUsageService? = nil,
+        codexService: CodexUsageService? = nil,
+        windsurfService: WindsurfUsageService? = nil,
+        notificationService: NotificationService? = nil,
+        claudeAuthLauncher: ClaudeAuthLauncher = ClaudeAuthLauncher(),
+        scheduler: PollingScheduler? = nil,
+        autostart: Bool = true
+    ) {
+        self.claudeService = claudeService ?? ClaudeUsageService()
+        self.codexService = codexService ?? CodexUsageService()
+        self.windsurfService = windsurfService ?? WindsurfUsageService()
+        self.notificationService = notificationService ?? NotificationService()
+        self.claudeAuthLauncher = claudeAuthLauncher
+        self.scheduler = scheduler ?? PollingScheduler()
+
+        guard autostart else { return }
+
+        self.notificationService.requestPermission()
         Task { @MainActor in
             await checkPrerequisitesAsync()
             startPolling()
         }
-        // Force refresh on wake from sleep — token may have been rotated
-        NotificationCenter.default.addObserver(
+        wakeObserver = NotificationCenter.default.addObserver(
             forName: NSWorkspace.didWakeNotification,
-            object: nil, queue: .main
+            object: nil,
+            queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                await self.claudeService.invalidateCredentialCache()
                 self.scheduler.resetBackoff()
                 self.lastPrerequisitesCheck = nil
                 await self.refresh()
             }
+        }
+    }
+
+    deinit {
+        if let wakeObserver {
+            NotificationCenter.default.removeObserver(wakeObserver)
         }
     }
 
@@ -89,11 +112,16 @@ final class UsageViewModel: ObservableObject {
     }
 
     func manualRefresh() {
-        scheduler.resetBackoff()
-        lastPrerequisitesCheck = nil // Re-check on manual refresh
-        Task {
-            await refresh(forceLiveWindsurf: true)
+        Task { @MainActor in
+            await performManualRefresh(forceLiveWindsurf: true)
         }
+    }
+
+    func performManualRefresh(forceLiveWindsurf: Bool) async {
+        await claudeService.invalidateCredentialCache()
+        scheduler.resetBackoff()
+        lastPrerequisitesCheck = nil
+        await refresh(forceLiveWindsurf: forceLiveWindsurf)
     }
 
     func updatePollingInterval(_ seconds: Double) {
@@ -102,7 +130,9 @@ final class UsageViewModel: ObservableObject {
     }
 
     func reauthenticateClaude() {
-        KeychainService().invalidateClaudeOAuthTokenCache()
+        Task {
+            await claudeService.invalidateCredentialCache()
+        }
         do {
             try claudeAuthLauncher.launchReauthentication()
         } catch {
@@ -212,23 +242,28 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func checkPrerequisitesAsync() async {
-        let ci = await claudeService.checkInstalled()
+        let claudeBinaryInstalled = await claudeService.checkInstalled()
+        let claudeHasCredentialFile = await claudeService.hasCredentialFile()
+        let claudeStatus = Self.claudePrerequisiteStatus(
+            isInstalled: claudeBinaryInstalled,
+            hasCredentialFile: claudeHasCredentialFile
+        )
         let cxi = await codexService.checkInstalled()
-        let cl = KeychainService().isClaudeLoggedIn()
         let cxl = await codexService.isLoggedIn()
         let wi = await windsurfService.checkInstalled()
         let wl = await windsurfService.isLoggedIn()
 
-        claudeInstalled = ci
-        claudeLoggedIn = cl
+        claudeInstalled = claudeStatus.installed
+        claudeLoggedIn = claudeStatus.loggedIn
         codexInstalled = cxi
         codexLoggedIn = cxl
         windsurfInstalled = wi
         windsurfLoggedIn = wl
 
         if showClaude {
-            if !ci { errors.append("Claude Code not installed") }
-            else if !cl { errors.append("Claude Code: not logged in") }
+            if let error = claudeStatus.error {
+                errors.append(error)
+            }
         }
         if showCodex {
             if !cxi { errors.append("Codex not installed") }
@@ -248,13 +283,6 @@ final class UsageViewModel: ObservableObject {
         guard claudeInstalled, claudeLoggedIn else { return }
         claudeUsage = Self.retryingFetchUsage(previous: claudeUsage)
 
-        // Use the cached token hash so refreshes do not keep re-triggering Keychain prompts.
-        let currentTokenHash = KeychainService().getClaudeOAuthToken()?.hashValue
-        if let last = lastClaudeTokenHash, let current = currentTokenHash, last != current {
-            scheduler.resetBackoff()
-        }
-        lastClaudeTokenHash = currentTokenHash
-
         do {
             let usage = try await claudeService.fetchUsage()
             claudeUsage = usage
@@ -267,7 +295,7 @@ final class UsageViewModel: ObservableObject {
                 let retryText = retryAfter.map { " (retry in \(Int($0))s)" } ?? ""
                 errors.append("Claude Code: rate limited\(retryText) - will retry automatically")
             case .authExpired:
-                KeychainService().invalidateClaudeOAuthTokenCache()
+                await claudeService.invalidateCredentialCache()
                 scheduler.resetBackoff()
                 lastPrerequisitesCheck = nil // Force re-check login status next poll
                 errors.append(error.localizedDescription)
@@ -367,5 +395,17 @@ final class UsageViewModel: ObservableObject {
         } else {
             try? SMAppService.mainApp.unregister()
         }
+    }
+
+    nonisolated static func claudePrerequisiteStatus(
+        isInstalled: Bool,
+        hasCredentialFile: Bool
+    ) -> (installed: Bool, loggedIn: Bool, error: String?) {
+        let ready = isInstalled || hasCredentialFile
+        return (
+            installed: ready,
+            loggedIn: ready,
+            error: ready ? nil : "Claude Code not installed"
+        )
     }
 }

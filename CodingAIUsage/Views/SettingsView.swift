@@ -74,7 +74,7 @@ struct SettingsView: View {
                                 reauthenticateClaude()
                             }
 
-                            Text("Opens Terminal and starts `claude auth logout` followed by `claude auth login`.")
+                            Text("Opens Terminal and starts `claude auth login --claudeai`. Use this when Claude refresh reports an auth or session problem.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)

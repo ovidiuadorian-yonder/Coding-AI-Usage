@@ -1,6 +1,7 @@
 import XCTest
 @testable import CodingAIUsage
 
+@MainActor
 final class UsageViewModelTests: XCTestCase {
     func testGlobalErrorsExcludeServiceSpecificErrors() {
         let windsurf = ServiceUsage(
@@ -71,5 +72,58 @@ final class UsageViewModelTests: XCTestCase {
         XCTAssertEqual(usage.error, "Windsurf: unexpected local state format")
         XCTAssertTrue(usage.windows.isEmpty)
         XCTAssertTrue(usage.footerLines.isEmpty)
+    }
+
+    func testClaudePrerequisitesTreatInstalledBinaryAsReadyWithoutCredentialFile() {
+        let status = UsageViewModel.claudePrerequisiteStatus(
+            isInstalled: true,
+            hasCredentialFile: false
+        )
+
+        XCTAssertTrue(status.installed)
+        XCTAssertTrue(status.loggedIn)
+        XCTAssertNil(status.error)
+    }
+
+    func testManualRefreshInvalidatesClaudeCredentialCache() async {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-manual-refresh-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let filePath = tempDir.appendingPathComponent(".claude/.credentials.json")
+        try? FileManager.default.createDirectory(at: filePath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? #"{"claudeAiOauth":{"accessToken":"file-token","expiresAt":9999999999999}}"#
+            .write(to: filePath, atomically: true, encoding: .utf8)
+
+        var invalidationCount = 0
+        let loader = ClaudeCredentialLoader(
+            homeDirectory: tempDir.path,
+            keychainService: .empty,
+            onInvalidate: { invalidationCount += 1 }
+        )
+        let claudeService = ClaudeUsageService(
+            credentialLoader: loader,
+            keychainService: loader.keychainService,
+            networkClient: { request in
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                let data = Data(#"{"five_hour":{"utilization":20,"resets_at":"2026-04-03T18:00:00.000Z"},"seven_day":{"utilization":40,"resets_at":"2026-04-08T18:00:00.000Z"}}"#.utf8)
+                return (data, response)
+            },
+            cliExecutor: { _, _ in .init(exitCode: 1, output: "") },
+            claudeBinaryLocator: { false }
+        )
+
+        let viewModel = UsageViewModel(
+            claudeService: claudeService,
+            autostart: false
+        )
+        viewModel.showCodex = false
+        viewModel.showWindsurf = false
+
+        _ = try? loader.loadAnyCredentials()
+        XCTAssertEqual(loader.cacheState.cachedAccessToken, "file-token")
+
+        await viewModel.performManualRefresh(forceLiveWindsurf: false)
+
+        XCTAssertEqual(invalidationCount, 1)
     }
 }

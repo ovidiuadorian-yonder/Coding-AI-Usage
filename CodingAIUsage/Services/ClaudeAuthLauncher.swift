@@ -1,7 +1,7 @@
 import Foundation
 
 struct ClaudeAuthLauncher {
-    static let reauthCommand = "/bin/zsh -lc 'claude auth logout || true; claude auth login --claudeai'"
+    static let reauthCommand = "/bin/zsh -lc 'claude auth login --claudeai'"
 
     static func appleScript(command: String = reauthCommand) -> String {
         let escapedCommand = command
