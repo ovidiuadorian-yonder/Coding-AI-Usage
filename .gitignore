@@ -9,3 +9,4 @@ DerivedData/
 *.dSYM
 *.ipa
 .claude/
+.worktrees/
