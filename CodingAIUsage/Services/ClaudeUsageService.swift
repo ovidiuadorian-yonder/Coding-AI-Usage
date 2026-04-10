@@ -5,10 +5,17 @@ struct ClaudeCLIExecutionResult {
     let output: String
 }
 
-actor ClaudeUsageService {
+protocol ClaudeUsageServing: Sendable {
+    func fetchUsage() async throws -> ServiceUsage
+    func checkInstalled() async -> Bool
+    func hasCredentialFile() async -> Bool
+    func invalidateCredentialCache() async
+}
+
+actor ClaudeUsageService: ClaudeUsageServing {
     typealias NetworkClient = @Sendable (URLRequest) async throws -> (Data, URLResponse)
-    typealias CLIExecutor = @Sendable (_ binary: String, _ arguments: [String]) -> ClaudeCLIExecutionResult
-    typealias BinaryLocator = @Sendable () -> Bool
+    typealias CLIExecutor = @Sendable (_ binaryPath: String, _ arguments: [String]) -> ClaudeCLIExecutionResult
+    typealias BinaryLocator = @Sendable () -> String?
 
     private enum CredentialScope {
         case file
@@ -30,8 +37,8 @@ actor ClaudeUsageService {
         networkClient: @escaping NetworkClient = { request in
             try await URLSession.shared.data(for: request)
         },
-        cliExecutor: @escaping CLIExecutor = { binary, arguments in
-            ClaudeUsageService.defaultCLIExecutor(binary: binary, arguments: arguments)
+        cliExecutor: @escaping CLIExecutor = { binaryPath, arguments in
+            ClaudeUsageService.defaultCLIExecutor(binaryPath: binaryPath, arguments: arguments)
         },
         claudeBinaryLocator: @escaping BinaryLocator = {
             ClaudeUsageService.defaultClaudeBinaryLocator()
@@ -51,9 +58,9 @@ actor ClaudeUsageService {
             )
         }
 
-        if checkInstalled() {
+        if let claudePath = claudeBinaryLocator() {
             do {
-                return try fetchUsageViaCLI()
+                return try fetchUsageViaCLI(binaryPath: claudePath)
             } catch let cliError as UsageError {
                 if let keychainCredentials = try credentialLoader.loadKeychainCredentials() {
                     return try await fetchUsageViaAPI(
@@ -75,20 +82,20 @@ actor ClaudeUsageService {
         throw UsageError.noCredentials("Claude Code: not logged in")
     }
 
-    func checkInstalled() -> Bool {
-        claudeBinaryLocator()
+    func checkInstalled() async -> Bool {
+        claudeBinaryLocator() != nil
     }
 
-    func hasCredentialFile() -> Bool {
+    func hasCredentialFile() async -> Bool {
         credentialLoader.hasCredentialFile()
     }
 
-    func invalidateCredentialCache() {
+    func invalidateCredentialCache() async {
         credentialLoader.invalidateCache()
     }
 
-    private func fetchUsageViaCLI() throws -> ServiceUsage {
-        let result = cliExecutor("claude", ["/usage", "--allowed-tools", ""])
+    private func fetchUsageViaCLI(binaryPath: String) throws -> ServiceUsage {
+        let result = cliExecutor(binaryPath, ["/usage", "--allowed-tools", ""])
         if result.output.isEmpty && result.exitCode != 0 {
             throw UsageError.networkError("Claude Code: CLI usage probe failed")
         }
@@ -236,41 +243,40 @@ actor ClaudeUsageService {
         }
     }
 
-    private static func defaultClaudeBinaryLocator() -> Bool {
+    private static func defaultClaudeBinaryLocator() -> String? {
         let paths = [
             "/usr/local/bin/claude",
             "/opt/homebrew/bin/claude",
             NSHomeDirectory() + "/.local/bin/claude"
         ]
         for path in paths where FileManager.default.isExecutableFile(atPath: path) {
-            return true
+            return path
         }
 
+        // Fall back to `which` for other installation paths (e.g. nvm, custom prefix).
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         process.arguments = ["claude"]
-        process.standardOutput = FileHandle.nullDevice
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
         process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
             process.waitUntilExit()
-            return process.terminationStatus == 0
+            guard process.terminationStatus == 0 else { return nil }
+            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            return path.isEmpty ? nil : path
         } catch {
-            return false
+            return nil
         }
     }
 
-    private static func defaultCLIExecutor(binary: String, arguments: [String]) -> ClaudeCLIExecutionResult {
+    private static func defaultCLIExecutor(binaryPath: String, arguments: [String]) -> ClaudeCLIExecutionResult {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        let escapedArguments = ([binary] + arguments).map { argument -> String in
-            if argument.isEmpty {
-                return "\"\""
-            }
-            return argument.contains(" ") ? "\"\(argument)\"" : argument
-        }.joined(separator: " ")
-        process.arguments = ["-lc", escapedArguments]
+        process.executableURL = URL(fileURLWithPath: binaryPath)
+        process.arguments = arguments
 
         let outputPipe = Pipe()
         let errorPipe = Pipe()

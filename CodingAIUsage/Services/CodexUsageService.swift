@@ -1,6 +1,12 @@
 import Foundation
 
-actor CodexUsageService {
+protocol CodexUsageServing: Sendable {
+    func fetchUsage() async throws -> ServiceUsage
+    func checkInstalled() async -> Bool
+    func isLoggedIn() async -> Bool
+}
+
+actor CodexUsageService: CodexUsageServing {
     private let authFilePath = NSHomeDirectory() + "/.codex/auth.json"
     private let usageURL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
 
@@ -52,7 +58,7 @@ actor CodexUsageService {
         return try? JSONDecoder().decode(CodexAuthFile.self, from: data)
     }
 
-    func checkInstalled() -> Bool {
+    func checkInstalled() async -> Bool {
         let paths = ["/usr/local/bin/codex", "/opt/homebrew/bin/codex"]
         for path in paths {
             if FileManager.default.isExecutableFile(atPath: path) { return true }
@@ -71,7 +77,7 @@ actor CodexUsageService {
         }
     }
 
-    func isLoggedIn() -> Bool {
+    func isLoggedIn() async -> Bool {
         readAuthFile()?.tokens?.accessToken != nil
     }
 }

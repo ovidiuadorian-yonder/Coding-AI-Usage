@@ -32,6 +32,7 @@ CC 5h% 50 | w% 63  CX 5h% 99 | w% 89  W d% 99 | w% 81
 - **Smart alerts** via macOS notifications when usage drops below a configurable threshold (default: 10%)
 - **Configurable polling** intervals: 3 min, 5 min (default), 10 min, 30 min, 1 hour
 - **Manual refresh** button for on-demand updates
+- **Cached last-known usage** restored on relaunch before the first refresh
 - **Automatic rate limit handling** with exponential backoff
 - **Launch at Login** support
 - **Error reporting** in red text when services are unavailable
@@ -77,13 +78,13 @@ chmod +x deploy.sh
 ./deploy.sh
 ```
 
-That's it! You should see `CC 5h% ... | w% ...  CX 5h% ... | w% ...  W d% ... | w% ...` appear in your menu bar within a few seconds.
+That's it. On a fresh install, the dropdown shows placeholder rows until you click **Refresh** once. After the first successful refresh, the app restores the last cached snapshot on relaunch without touching protected resources first.
 
 If you need more granular control, `./build.sh` only creates the local `.app` bundle without installing or launching it.
 
 ### Install to Applications (Optional)
 
-`./deploy.sh` already installs the app into `/Applications` and launches it.
+`./deploy.sh` force-stops any running copy, installs the app into `/Applications`, and launches it again.
 
 If you only want the raw `.app` bundle without installing it, use:
 
@@ -107,11 +108,13 @@ defaults delete com.ovidiuadorian.CodingAIUsage
 
 On the first launch, macOS will prompt you for permissions:
 
-1. **Keychain Access** - The app reads your Claude Code OAuth token from the macOS Keychain. Click **"Always Allow"** to avoid being prompted every time.
+1. **Keychain Access** - The app reads your Claude Code OAuth token from the macOS Keychain on the first manual refresh. Click **"Always Allow"** to avoid being prompted every time.
 
 2. **Notifications** (optional) - Allow notifications to receive alerts when your usage is running low.
 
 > **Tip:** If you accidentally clicked "Deny" on the Keychain prompt, you can reset it by opening **Keychain Access.app**, finding the `Claude Code-credentials` entry, and removing the app from its Access Control list. The app will prompt again on the next refresh.
+>
+> **Startup behavior:** The app no longer reads Keychain, Codex auth, or Windsurf state automatically on launch. It waits for a manual refresh, then caches the last successful snapshot so later relaunches can show the previous usage immediately.
 
 ---
 
@@ -142,7 +145,7 @@ Click the menu bar text to open the detail panel:
 
 - **Progress bars** for each time window with color coding
 - **Reset timers** showing when each window resets
-- **Refresh** - manually trigger an update (resets any rate limit backoff)
+- **Refresh** - manually trigger an update, unlock protected-resource reads for this app session, and reset any rate limit backoff
 - **Settings** - configure services, polling, alerts, and launch at login
 - **About** - app info and credits
 - **Exit** - quit the app
@@ -169,9 +172,11 @@ The app reads locally stored credentials and usage state:
 | **Windsurf** | `~/Library/Application Support/Windsurf/User/globalStorage/state.vscdb` | Local cached user-status protobuf in `windsurfAuthStatus` / `codeium.windsurf`, with experimental session-backed scrape of `windsurf.com/subscription/usage` only as a fallback |
 
 - **No passwords or API keys are stored by the app** - it reads existing credentials that the CLI tools have already saved
+- **Protected resources are deferred until manual refresh** - launch and background polling do not read Keychain or service files before the first user-initiated refresh
+- **Last known usage is cached locally** - successful refreshes are persisted and restored on relaunch so the dropdown is not empty between sessions
 - **Windsurf exact daily/weekly quotas are required** - billing-cycle-only cache data is not shown in the compact menu bar
 - **Windsurf local source order** - cached user-status protobuf first, cached JSON snapshot second, experimental authenticated scrape last
-- Polling happens on a timer with automatic **exponential backoff** when rate-limited (capped at 30 minutes)
+- Polling happens on a timer with automatic **exponential backoff** when rate-limited (capped at 30 minutes) after protected access has been unlocked for the session
 - Clicking **Refresh** resets any backoff and retries immediately
 
 ---
@@ -181,10 +186,10 @@ The app reads locally stored credentials and usage state:
 | Permission | Why | When Prompted |
 |---|---|---|
 | **Keychain Access** | Read Claude Code OAuth token | First refresh |
-| **Network** | HTTPS to `api.anthropic.com`, `chatgpt.com`, and `windsurf.com` | Automatic |
+| **Network** | HTTPS to `api.anthropic.com`, `chatgpt.com`, and `windsurf.com` | First refresh and later polling |
 | **Notifications** | Low-usage alerts | First launch |
-| **File System** (`~/.codex/`) | Read Codex auth token | Automatic |
-| **File System** (`~/Library/Application Support/Windsurf/`) | Read Windsurf state DB and fallback cookies | Automatic |
+| **File System** (`~/.codex/`) | Read Codex auth token | First refresh and later polling |
+| **File System** (`~/Library/Application Support/Windsurf/`) | Read Windsurf state DB and fallback cookies | First refresh and later polling |
 
 The app is **not sandboxed** by design. It needs cross-app Keychain access and filesystem access to `~/.codex/` that macOS sandboxing would block. This is the same approach used by other developer tools like CodexBar and Claude-Usage-Tracker.
 
@@ -205,7 +210,8 @@ The app is **not sandboxed** by design. It needs cross-app Keychain access and f
 | `Windsurf: not logged in` | No Windsurf auth state in the local state DB | Sign in inside Windsurf |
 | `Windsurf: daily/weekly quota unavailable` | Exact daily/weekly quotas were missing from local cached state and the fallback scrape could not recover them | Open Windsurf, let the Plan Info page load, then refresh |
 | Keychain prompt every time | Clicked "Allow" instead of "Always Allow" | Open Keychain Access, find `Claude Code-credentials`, update Access Control |
-| No data showing | First poll hasn't completed yet | Wait a few seconds or click Refresh |
+| Only `Click Refresh to load usage.` is showing | No cached snapshot exists yet for this install | Click Refresh once to seed the cache |
+| Relaunch shows old values | The app restores the last cached snapshot until the next successful refresh | Click Refresh to fetch current usage |
 
 ---
 
@@ -246,6 +252,7 @@ CodingAIUsage/
 │   ├── KeychainService.swift       # macOS Keychain reader
 │   ├── ClaudeUsageService.swift    # Claude API client
 │   ├── CodexUsageService.swift     # Codex API client
+│   ├── UsageCacheStore.swift       # Persist last-known service snapshots between launches
 │   ├── WindsurfUsageService.swift  # Windsurf local state reader + fallback usage scraper
 │   ├── NotificationService.swift   # Alert notifications
 │   └── PollingScheduler.swift      # Timer with exponential backoff

@@ -6,16 +6,39 @@ import CommonCrypto
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-actor WindsurfUsageService {
+protocol WindsurfUsageServing: Sendable {
+    func fetchUsage(preferLiveRefresh: Bool) async throws -> ServiceUsage
+    func checkInstalled() async -> Bool
+    func isLoggedIn() async -> Bool
+}
+
+actor WindsurfUsageService: WindsurfUsageServing {
+    typealias CookieStateProvider = @Sendable () throws -> WindsurfCookieState
+    typealias LiveSnapshotProvider = @Sendable (_ planInfo: WindsurfCachedPlanInfo?, _ cookies: [HTTPCookie]) async throws -> WindsurfPageSnapshot?
+
     private let stateDBPath: String
     private let usageURL: URL
+    private let cookieStateProvider: CookieStateProvider
+    private let liveSnapshotProvider: LiveSnapshotProvider
 
     init(
         stateDBPath: String = NSHomeDirectory() + "/Library/Application Support/Windsurf/User/globalStorage/state.vscdb",
-        usageURL: URL = URL(string: "https://windsurf.com/subscription/usage")!
+        usageURL: URL = URL(string: "https://windsurf.com/subscription/usage")!,
+        cookieStateProvider: CookieStateProvider? = nil,
+        liveSnapshotProvider: LiveSnapshotProvider? = nil
     ) {
         self.stateDBPath = stateDBPath
         self.usageURL = usageURL
+        self.cookieStateProvider = cookieStateProvider ?? { [stateDBPath] in
+            try WindsurfUsageService.readCookies(stateDBPath: stateDBPath)
+        }
+        self.liveSnapshotProvider = liveSnapshotProvider ?? { [usageURL] planInfo, cookies in
+            try await WindsurfUsageService.scrapeSnapshot(
+                usageURL: usageURL,
+                planInfo: planInfo,
+                cookies: cookies
+            )
+        }
     }
 
     func fetchUsage(preferLiveRefresh: Bool = false) async throws -> ServiceUsage {
@@ -26,21 +49,44 @@ actor WindsurfUsageService {
         let planInfo = try readCachedPlanInfo()
         let lastUpdated = Date()
 
-        let cachedSnapshot = try readStructuredSnapshot(authStatus: authStatus, planInfo: planInfo)
+        let persistedSnapshot = try
+            planInfo?.quotaSnapshot ??
+            readStructuredSnapshot(authStatus: authStatus, planInfo: planInfo)
+
+        let cookieState: WindsurfCookieState
         let liveSnapshot: WindsurfPageSnapshot?
         if preferLiveRefresh {
-            liveSnapshot = try? await scrapeSnapshot(planInfo: planInfo)
-        } else if cachedSnapshot == nil {
-            liveSnapshot = try await scrapeSnapshot(planInfo: planInfo)
+            cookieState = try cookieStateProvider()
+            if cookieState.hasLikelyAuthCookies {
+                liveSnapshot = try? await liveSnapshotProvider(planInfo, cookieState.cookies)
+            } else {
+                liveSnapshot = nil
+            }
         } else {
+            cookieState = WindsurfCookieState(cookies: [], hasLikelyAuthCookies: false)
             liveSnapshot = nil
         }
 
         if let snapshot = WindsurfSnapshotResolver.resolve(
-            cached: cachedSnapshot,
+            cached: persistedSnapshot,
             live: liveSnapshot,
             preferLive: preferLiveRefresh
         ) {
+            if preferLiveRefresh && WindsurfQuotaDiagnostics.shouldHideSuspiciousLocalQuota(
+                snapshot: snapshot,
+                hasLikelyLiveAuthCookies: cookieState.hasLikelyAuthCookies
+            ) {
+                return ServiceUsage(
+                    id: "windsurf",
+                    displayName: "Windsurf",
+                    shortLabel: "W",
+                    windows: [],
+                    lastUpdated: lastUpdated,
+                    error: "Windsurf: live quota unavailable; local cache may be stale",
+                    footerLines: snapshot.footerLines
+                )
+            }
+
             return snapshot.toServiceUsage(lastUpdated: lastUpdated)
         }
 
@@ -55,13 +101,13 @@ actor WindsurfUsageService {
         )
     }
 
-    func checkInstalled() -> Bool {
+    func checkInstalled() async -> Bool {
         let appPath = "/Applications/Windsurf.app"
         let supportPath = NSHomeDirectory() + "/Library/Application Support/Windsurf"
         return FileManager.default.fileExists(atPath: appPath) || FileManager.default.fileExists(atPath: supportPath)
     }
 
-    func isLoggedIn() -> Bool {
+    func isLoggedIn() async -> Bool {
         guard let authStatus = try? readAuthStatus() else {
             return false
         }
@@ -168,8 +214,11 @@ actor WindsurfUsageService {
         )
     }
 
-    private func scrapeSnapshot(planInfo: WindsurfCachedPlanInfo?) async throws -> WindsurfPageSnapshot? {
-        let cookies = try readCookies()
+    private static func scrapeSnapshot(
+        usageURL: URL,
+        planInfo: WindsurfCachedPlanInfo?,
+        cookies: [HTTPCookie]
+    ) async throws -> WindsurfPageSnapshot? {
         guard !cookies.isEmpty else {
             return nil
         }
@@ -189,7 +238,7 @@ actor WindsurfUsageService {
         )
     }
 
-    private func readCookies() throws -> [HTTPCookie] {
+    private static func readCookies(stateDBPath _: String) throws -> WindsurfCookieState {
         let cookieStores = [
             ChromiumCookieStore(
                 path: NSHomeDirectory() + "/Library/Application Support/Windsurf/Cookies",
@@ -208,17 +257,34 @@ actor WindsurfUsageService {
             )
         ]
 
+        var fallbackCookies: [HTTPCookie] = []
+
         for store in cookieStores where FileManager.default.fileExists(atPath: store.path) {
             let cookies = try readCookies(from: store)
-            if !cookies.isEmpty {
-                return cookies
+            let hasLikelyAuthCookies = cookies.contains(where: Self.isLikelyAuthCookie(_:))
+
+            if hasLikelyAuthCookies {
+                return WindsurfCookieState(
+                    cookies: cookies,
+                    hasLikelyAuthCookies: true
+                )
+            }
+
+            if fallbackCookies.isEmpty, !cookies.isEmpty {
+                fallbackCookies = cookies
             }
         }
 
-        return []
+        return WindsurfCookieState(cookies: fallbackCookies, hasLikelyAuthCookies: false)
     }
 
-    private func readCookies(from store: ChromiumCookieStore) throws -> [HTTPCookie] {
+    private static func isLikelyAuthCookie(_ cookie: HTTPCookie) -> Bool {
+        let name = cookie.name.lowercased()
+        let analyticsPrefixes = ["_ga", "__stripe_", "ph_", "ajs_", "amplitude", "mp_"]
+        return !analyticsPrefixes.contains(where: { name.hasPrefix($0) })
+    }
+
+    private static func readCookies(from store: ChromiumCookieStore) throws -> [HTTPCookie] {
         var db: OpaquePointer?
         guard sqlite3_open_v2(store.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
             throw UsageError.invalidResponse
@@ -318,17 +384,17 @@ actor WindsurfUsageService {
             return nil
         }
 
-        return sqliteString(statement, index: 0)
+        return Self.sqliteString(statement, index: 0)
     }
 
-    private func sqliteString(_ statement: OpaquePointer?, index: Int32) -> String? {
+    private static func sqliteString(_ statement: OpaquePointer?, index: Int32) -> String? {
         guard let cString = sqlite3_column_text(statement, index) else {
             return nil
         }
         return String(cString: cString)
     }
 
-    private func sqliteData(_ statement: OpaquePointer?, index: Int32) -> Data? {
+    private static func sqliteData(_ statement: OpaquePointer?, index: Int32) -> Data? {
         let byteCount = Int(sqlite3_column_bytes(statement, index))
         guard byteCount > 0, let bytes = sqlite3_column_blob(statement, index) else {
             return nil
@@ -336,7 +402,7 @@ actor WindsurfUsageService {
         return Data(bytes: bytes, count: byteCount)
     }
 
-    private func chromiumDate(from value: Int64) -> Date {
+    private static func chromiumDate(from value: Int64) -> Date {
         let secondsSince1601 = Double(value) / 1_000_000.0
         let secondsBetweenEpochs = 11_644_473_600.0
         return Date(timeIntervalSince1970: secondsSince1601 - secondsBetweenEpochs)
@@ -347,6 +413,11 @@ private struct ChromiumCookieStore {
     let path: String
     let safeStorageService: String
     let safeStorageAccount: String
+}
+
+struct WindsurfCookieState {
+    let cookies: [HTTPCookie]
+    let hasLikelyAuthCookies: Bool
 }
 
 struct WindsurfChromiumCookieCrypto {

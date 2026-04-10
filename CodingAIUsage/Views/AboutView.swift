@@ -3,6 +3,13 @@ import SwiftUI
 struct AboutView: View {
     let onClose: () -> Void
 
+    private var versionText: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "Unknown"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "Version \(version) (\(build))"
+    }
+
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "chart.bar.fill")
@@ -12,13 +19,13 @@ struct AboutView: View {
             Text("Coding AI Usage")
                 .font(.title.bold())
 
-            Text("Version 1.0.0")
+            Text(versionText)
                 .font(.subheadline)
                 .foregroundColor(.secondary)
 
             Divider()
 
-            Text("Track your Claude Code and Codex usage directly from the macOS menu bar.")
+            Text("Track Claude Code, Codex, and Windsurf usage directly from the macOS menu bar.")
                 .font(.body)
                 .multilineTextAlignment(.center)
                 .foregroundColor(.secondary)
@@ -37,6 +44,6 @@ struct AboutView: View {
                 .keyboardShortcut(.defaultAction)
         }
         .padding(24)
-        .frame(width: 300)
+        .frame(minWidth: 300, idealWidth: 320, maxWidth: 380)
     }
 }

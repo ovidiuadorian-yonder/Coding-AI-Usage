@@ -3,18 +3,44 @@ import UserNotifications
 
 @MainActor
 final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
+    typealias PermissionRequestHandler = (@escaping (Bool) -> Void) -> Void
+
     private var lastAlerts: [String: Date] = [:]
     private var previouslyBelowThreshold: [String: Bool] = [:]
     private let cooldownInterval: TimeInterval = 1800  // 30 minutes
 
     private var permissionGranted = false
+    private let requestPermissionHandler: PermissionRequestHandler
+    private let configureAuthorizationHandler: (NotificationService) -> Void
+    private let addRequestHandler: (UNNotificationRequest) -> Void
+    private let bundleIdentifierProvider: () -> String?
+
+    init(
+        requestPermissionHandler: @escaping PermissionRequestHandler = { completion in
+            let center = UNUserNotificationCenter.current()
+            center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                completion(granted)
+            }
+        },
+        configureAuthorizationHandler: @escaping (NotificationService) -> Void = { service in
+            UNUserNotificationCenter.current().delegate = service
+        },
+        addRequestHandler: @escaping (UNNotificationRequest) -> Void = { request in
+            UNUserNotificationCenter.current().add(request)
+        },
+        bundleIdentifierProvider: @escaping () -> String? = { Bundle.main.bundleIdentifier }
+    ) {
+        self.requestPermissionHandler = requestPermissionHandler
+        self.configureAuthorizationHandler = configureAuthorizationHandler
+        self.addRequestHandler = addRequestHandler
+        self.bundleIdentifierProvider = bundleIdentifierProvider
+    }
 
     func requestPermission() {
         // UNUserNotificationCenter requires a proper app bundle
-        guard Bundle.main.bundleIdentifier != nil else { return }
-        let center = UNUserNotificationCenter.current()
-        center.delegate = self
-        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+        guard bundleIdentifierProvider() != nil else { return }
+        configureAuthorizationHandler(self)
+        requestPermissionHandler { granted in
             Task { @MainActor [weak self] in
                 self?.permissionGranted = granted
             }
@@ -65,7 +91,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
     }
 
     private func sendNotification(service: ServiceUsage, window: UsageWindow) -> Bool {
-        guard permissionGranted, Bundle.main.bundleIdentifier != nil else { return false }
+        guard permissionGranted, bundleIdentifierProvider() != nil else { return false }
         let content = UNMutableNotificationContent()
         content.title = "Coding AI Usage - \(service.displayName)"
 
@@ -84,7 +110,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
             trigger: nil
         )
 
-        UNUserNotificationCenter.current().add(request)
+        addRequestHandler(request)
         return true
     }
 }

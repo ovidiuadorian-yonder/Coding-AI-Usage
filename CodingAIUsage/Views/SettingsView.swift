@@ -12,6 +12,20 @@ struct SettingsView: View {
         ("1 hour", 3600)
     ]
 
+    private var notificationsBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.notificationsEnabled },
+            set: { viewModel.setNotificationsEnabled($0) }
+        )
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.launchAtLogin },
+            set: { viewModel.setLaunchAtLogin($0) }
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Settings")
@@ -64,7 +78,13 @@ struct SettingsView: View {
             // Launch at login
             GroupBox("General") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Toggle("Launch at Login", isOn: $viewModel.launchAtLogin)
+                    Toggle("Enable Low-Usage Notifications", isOn: notificationsBinding)
+                    Text("Notifications stay off until you explicitly enable them here.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Toggle("Launch at Login", isOn: launchAtLoginBinding)
 
                     if viewModel.showClaude {
                         Divider()
@@ -97,7 +117,7 @@ struct SettingsView: View {
             }
         }
         .padding()
-        .frame(width: 380)
+        .frame(minWidth: 360, idealWidth: 380, maxWidth: 440)
     }
 
     private func reauthenticateClaude() {

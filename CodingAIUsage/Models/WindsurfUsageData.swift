@@ -7,6 +7,10 @@ struct WindsurfCachedPlanInfo: Codable {
     let usage: Usage
     let hasBillingWritePermissions: Bool?
     let gracePeriodStatus: Int?
+    let billingStrategy: String?
+    let quotaUsage: QuotaUsage?
+    let hideDailyQuota: Bool?
+    let hideWeeklyQuota: Bool?
 
     struct Usage: Codable {
         let duration: Int?
@@ -21,12 +25,40 @@ struct WindsurfCachedPlanInfo: Codable {
         let remainingFlexCredits: Int?
     }
 
+    struct QuotaUsage: Codable {
+        let dailyRemainingPercent: Int
+        let weeklyRemainingPercent: Int
+        let overageBalanceMicros: Int64?
+        let dailyResetAtUnix: Int64?
+        let weeklyResetAtUnix: Int64?
+    }
+
     var startDate: Date {
         Date(timeIntervalSince1970: TimeInterval(startTimestamp) / 1000.0)
     }
 
     var endDate: Date {
         Date(timeIntervalSince1970: TimeInterval(endTimestamp) / 1000.0)
+    }
+
+    var quotaSnapshot: WindsurfPageSnapshot? {
+        guard let quotaUsage, billingStrategy == "quota" else {
+            return nil
+        }
+
+        return WindsurfPageSnapshot(
+            dailyUsagePercent: max(0, min(100, 100 - quotaUsage.dailyRemainingPercent)),
+            weeklyUsagePercent: max(0, min(100, 100 - quotaUsage.weeklyRemainingPercent)),
+            dailyResetTime: quotaUsage.dailyResetAtUnix.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+            weeklyResetTime: quotaUsage.weeklyResetAtUnix.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+            extraUsageBalance: quotaUsage.overageBalanceMicros.map { Self.formatCurrency(micros: $0) },
+            planEndDate: endDate
+        )
+    }
+
+    private static func formatCurrency(micros: Int64) -> String {
+        let dollars = Double(micros) / 1_000_000.0
+        return String(format: "$%.2f", dollars)
     }
 }
 
@@ -44,7 +76,7 @@ struct WindsurfPageSnapshot: Equatable {
     let extraUsageBalance: String?
     let planEndDate: Date?
 
-    func toServiceUsage(lastUpdated: Date) -> ServiceUsage {
+    var footerLines: [String] {
         var footerLines: [String] = []
 
         if let planEndDate {
@@ -57,6 +89,10 @@ struct WindsurfPageSnapshot: Equatable {
             footerLines.append(extraUsageBalance)
         }
 
+        return footerLines
+    }
+
+    func toServiceUsage(lastUpdated: Date) -> ServiceUsage {
         return ServiceUsage(
             id: "windsurf",
             displayName: "Windsurf",
@@ -310,7 +346,23 @@ enum WindsurfSnapshotResolver {
         if preferLive {
             return live ?? cached
         }
-        return cached ?? live
+        return live ?? cached
+    }
+}
+
+enum WindsurfQuotaDiagnostics {
+    static func shouldHideSuspiciousLocalQuota(
+        snapshot: WindsurfPageSnapshot,
+        hasLikelyLiveAuthCookies: Bool
+    ) -> Bool {
+        guard !hasLikelyLiveAuthCookies else {
+            return false
+        }
+
+        // Windsurf's local persisted quota state can report 100/100 while the live app UI shows usage.
+        // If we have no viable authenticated web session for a live refresh, prefer surfacing uncertainty
+        // instead of showing a confidently wrong "100% remaining / Healthy" state.
+        return snapshot.dailyUsagePercent == 0 && snapshot.weeklyUsagePercent == 0
     }
 }
 

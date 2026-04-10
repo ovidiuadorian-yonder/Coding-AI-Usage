@@ -1,9 +1,15 @@
 import SwiftUI
 import Combine
-import ServiceManagement
 
 @MainActor
 final class UsageViewModel: ObservableObject {
+    enum RefreshResult: Equatable {
+        case skipped
+        case success
+        case failure
+        case rateLimited(retryAfter: TimeInterval?)
+    }
+
     @Published var claudeUsage: ServiceUsage?
     @Published var codexUsage: ServiceUsage?
     @Published var windsurfUsage: ServiceUsage?
@@ -13,18 +19,20 @@ final class UsageViewModel: ObservableObject {
     @AppStorage("showClaude") var showClaude = true
     @AppStorage("showCodex") var showCodex = true
     @AppStorage("showWindsurf") var showWindsurf = true
+    @AppStorage("notificationsEnabled") var notificationsEnabled = false
     @AppStorage("pollingIntervalSeconds") var pollingIntervalSeconds: Double = 300
     @AppStorage("alertThreshold") var alertThreshold: Double = 0.10
-    @AppStorage("launchAtLogin") var launchAtLogin = false {
-        didSet { updateLaunchAtLogin() }
-    }
+    @AppStorage("launchAtLogin") var launchAtLogin = false
 
-    private let claudeService: ClaudeUsageService
-    private let codexService: CodexUsageService
-    private let windsurfService: WindsurfUsageService
+    private let claudeService: any ClaudeUsageServing
+    private let codexService: any CodexUsageServing
+    private let windsurfService: any WindsurfUsageServing
     private let notificationService: NotificationService
     private let claudeAuthLauncher: ClaudeAuthLauncher
+    private let launchAtLoginController: LaunchAtLoginControlling
+    private let cacheStore: any UsageCacheStoring
     let scheduler: PollingScheduler
+    private var hasUnlockedProtectedAccess = false
 
     // Status checks (re-checked every 10 min, on wake, on manual refresh, and on auth errors)
     @Published var claudeInstalled = false
@@ -36,13 +44,16 @@ final class UsageViewModel: ObservableObject {
     private var lastPrerequisitesCheck: Date?
     private let prerequisitesCheckInterval: TimeInterval = 600 // Re-check every 10 min
     private var wakeObserver: NSObjectProtocol?
+    nonisolated private static let maxAutomaticRetryInterval: TimeInterval = 1800
 
     init(
-        claudeService: ClaudeUsageService? = nil,
-        codexService: CodexUsageService? = nil,
-        windsurfService: WindsurfUsageService? = nil,
+        claudeService: (any ClaudeUsageServing)? = nil,
+        codexService: (any CodexUsageServing)? = nil,
+        windsurfService: (any WindsurfUsageServing)? = nil,
         notificationService: NotificationService? = nil,
         claudeAuthLauncher: ClaudeAuthLauncher = ClaudeAuthLauncher(),
+        launchAtLoginController: LaunchAtLoginControlling = SystemLaunchAtLoginController(),
+        cacheStore: (any UsageCacheStoring)? = nil,
         scheduler: PollingScheduler? = nil,
         autostart: Bool = true
     ) {
@@ -51,13 +62,18 @@ final class UsageViewModel: ObservableObject {
         self.windsurfService = windsurfService ?? WindsurfUsageService()
         self.notificationService = notificationService ?? NotificationService()
         self.claudeAuthLauncher = claudeAuthLauncher
+        self.launchAtLoginController = launchAtLoginController
+        self.cacheStore = cacheStore ?? UserDefaultsUsageCacheStore()
         self.scheduler = scheduler ?? PollingScheduler()
+        syncLaunchAtLoginState()
+        restoreCachedUsage()
 
         guard autostart else { return }
 
-        self.notificationService.requestPermission()
+        if notificationsEnabled {
+            self.notificationService.requestPermission()
+        }
         Task { @MainActor in
-            await checkPrerequisitesAsync()
             startPolling()
         }
         wakeObserver = NotificationCenter.default.addObserver(
@@ -70,7 +86,8 @@ final class UsageViewModel: ObservableObject {
                 await self.claudeService.invalidateCredentialCache()
                 self.scheduler.resetBackoff()
                 self.lastPrerequisitesCheck = nil
-                await self.refresh()
+                let nextInterval = await self.refresh()
+                self.scheduler.reschedule(after: nextInterval)
             }
         }
     }
@@ -84,7 +101,8 @@ final class UsageViewModel: ObservableObject {
     func startPolling() {
         scheduler.updateBaseInterval(pollingIntervalSeconds)
         scheduler.start { [weak self] in
-            await self?.refresh()
+            guard let self else { return nil }
+            return await self.refresh()
         }
     }
 
@@ -92,9 +110,21 @@ final class UsageViewModel: ObservableObject {
         scheduler.stop()
     }
 
-    func refresh(forceLiveWindsurf: Bool = false) async {
+    func refresh(
+        forceLiveWindsurf: Bool = false,
+        userInitiated: Bool = false
+    ) async -> TimeInterval {
         isRefreshing = true
         errors.removeAll()
+
+        if userInitiated {
+            hasUnlockedProtectedAccess = true
+        }
+
+        guard hasUnlockedProtectedAccess else {
+            isRefreshing = false
+            return pollingIntervalSeconds
+        }
 
         let needsPrereqCheck = lastPrerequisitesCheck == nil ||
             Date().timeIntervalSince(lastPrerequisitesCheck!) > prerequisitesCheckInterval
@@ -103,30 +133,49 @@ final class UsageViewModel: ObservableObject {
             lastPrerequisitesCheck = Date()
         }
 
-        async let claudeResult: Void = fetchClaude()
-        async let codexResult: Void = fetchCodex()
-        async let windsurfResult: Void = fetchWindsurf(preferLiveRefresh: forceLiveWindsurf)
-        _ = await (claudeResult, codexResult, windsurfResult)
+        async let claudeResult: RefreshResult = fetchClaude()
+        async let codexResult: RefreshResult = fetchCodex()
+        async let windsurfResult: RefreshResult = fetchWindsurf(preferLiveRefresh: forceLiveWindsurf)
+        let results = await [claudeResult, codexResult, windsurfResult]
 
         isRefreshing = false
+        return Self.nextPollingInterval(baseInterval: pollingIntervalSeconds, results: results)
     }
 
     func manualRefresh() {
         Task { @MainActor in
-            await performManualRefresh(forceLiveWindsurf: true)
+            await performManualRefresh(forceLiveWindsurf: false)
         }
     }
 
     func performManualRefresh(forceLiveWindsurf: Bool) async {
-        await claudeService.invalidateCredentialCache()
         scheduler.resetBackoff()
         lastPrerequisitesCheck = nil
-        await refresh(forceLiveWindsurf: forceLiveWindsurf)
+        let nextInterval = await refresh(
+            forceLiveWindsurf: forceLiveWindsurf,
+            userInitiated: true
+        )
+        scheduler.reschedule(after: nextInterval)
     }
 
     func updatePollingInterval(_ seconds: Double) {
         pollingIntervalSeconds = seconds
         scheduler.updateBaseInterval(seconds)
+    }
+
+    func setNotificationsEnabled(_ enabled: Bool) {
+        notificationsEnabled = enabled
+        guard enabled else { return }
+        notificationService.requestPermission()
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            try launchAtLoginController.setEnabled(enabled)
+        } catch {
+            errors.append("Launch at Login: unable to update login item (\(String(describing: error)))")
+        }
+        syncLaunchAtLoginState()
     }
 
     func reauthenticateClaude() {
@@ -167,6 +216,20 @@ final class UsageViewModel: ObservableObject {
         }
 
         return parts.joined(separator: "  ")
+    }
+
+    var menuBarAccessibilityLabel: String {
+        let summaries = [
+            menuBarSummary(for: claudeUsage, visible: showClaude),
+            menuBarSummary(for: codexUsage, visible: showCodex),
+            menuBarSummary(for: windsurfUsage, visible: showWindsurf)
+        ].compactMap { $0 }
+
+        if summaries.isEmpty {
+            return "Coding AI usage, no enabled services with available status"
+        }
+
+        return "Coding AI usage. " + summaries.joined(separator: ". ")
     }
 
     var lastUpdated: Date? {
@@ -217,6 +280,21 @@ final class UsageViewModel: ObservableObject {
         )
     }
 
+    var displayedServices: [ServiceUsage] {
+        let enabledServices = [
+            (showClaude, claudeUsage, "claude", "Claude Code", "CC"),
+            (showCodex, codexUsage, "codex", "Codex", "CX"),
+            (showWindsurf, windsurfUsage, "windsurf", "Windsurf", "W")
+        ]
+
+        return enabledServices.compactMap { isEnabled, usage, id, displayName, shortLabel in
+            guard isEnabled else { return nil }
+            if let usage { return usage }
+            guard !hasUnlockedProtectedAccess else { return nil }
+            return Self.waitingUsage(id: id, displayName: displayName, shortLabel: shortLabel)
+        }
+    }
+
     // MARK: - Private
 
     nonisolated static func filteredGlobalErrors(allErrors: [String], services: [ServiceUsage]) -> [String] {
@@ -229,6 +307,17 @@ final class UsageViewModel: ObservableObject {
         return nil
     }
 
+    nonisolated static func waitingUsage(id: String, displayName: String, shortLabel: String) -> ServiceUsage {
+        ServiceUsage(
+            id: id,
+            displayName: displayName,
+            shortLabel: shortLabel,
+            windows: [],
+            lastUpdated: .distantPast,
+            error: "Click Refresh to load usage."
+        )
+    }
+
     nonisolated static func windsurfFailureUsage(message: String, previous: ServiceUsage?) -> ServiceUsage {
         ServiceUsage(
             id: previous?.id ?? "windsurf",
@@ -239,6 +328,25 @@ final class UsageViewModel: ObservableObject {
             error: message,
             footerLines: []
         )
+    }
+
+    nonisolated static func nextPollingInterval(
+        baseInterval: TimeInterval,
+        results: [RefreshResult]
+    ) -> TimeInterval {
+        let retryIntervals = results.compactMap { result -> TimeInterval? in
+            switch result {
+            case .rateLimited(let retryAfter):
+                if let retryAfter {
+                    return min(retryAfter + 30, maxAutomaticRetryInterval)
+                }
+                return min(baseInterval * 2, maxAutomaticRetryInterval)
+            case .skipped, .success, .failure:
+                return nil
+            }
+        }
+
+        return retryIntervals.max() ?? baseInterval
     }
 
     private func checkPrerequisitesAsync() async {
@@ -275,125 +383,138 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
-    private func fetchClaude() async {
+    private func fetchClaude() async -> RefreshResult {
         guard showClaude else {
             claudeUsage = nil
-            return
+            return .skipped
         }
-        guard claudeInstalled, claudeLoggedIn else { return }
+        guard claudeInstalled, claudeLoggedIn else { return .skipped }
         claudeUsage = Self.retryingFetchUsage(previous: claudeUsage)
 
         do {
             let usage = try await claudeService.fetchUsage()
             claudeUsage = usage
-            scheduler.reportSuccess()
-            notificationService.checkAndNotify(service: usage, threshold: alertThreshold)
+            cacheStore.save(usage)
+            notifyIfEnabled(for: usage)
+            return .success
         } catch let error as UsageError {
             switch error {
             case .rateLimited(let retryAfter):
-                scheduler.reportRateLimited(retryAfter: retryAfter)
                 let retryText = retryAfter.map { " (retry in \(Int($0))s)" } ?? ""
                 errors.append("Claude Code: rate limited\(retryText) - will retry automatically")
+                return .rateLimited(retryAfter: retryAfter)
             case .authExpired:
                 await claudeService.invalidateCredentialCache()
-                scheduler.resetBackoff()
                 lastPrerequisitesCheck = nil // Force re-check login status next poll
                 errors.append(error.localizedDescription)
                 claudeUsage = ServiceUsage(
                     id: "claude", displayName: "Claude Code", shortLabel: "CC",
                     windows: [], lastUpdated: Date(), error: error.localizedDescription
                 )
+                if let claudeUsage { cacheStore.save(claudeUsage) }
+                return .failure
             default:
                 errors.append(error.localizedDescription)
                 claudeUsage = ServiceUsage(
                     id: "claude", displayName: "Claude Code", shortLabel: "CC",
                     windows: [], lastUpdated: Date(), error: error.localizedDescription
                 )
+                if let claudeUsage { cacheStore.save(claudeUsage) }
+                return .failure
             }
         } catch is DecodingError {
             errors.append("Claude Code: unexpected API response format")
+            return .failure
         } catch {
             errors.append("Claude Code: \(error.localizedDescription)")
+            return .failure
         }
     }
 
-    private func fetchCodex() async {
+    private func fetchCodex() async -> RefreshResult {
         guard showCodex else {
             codexUsage = nil
-            return
+            return .skipped
         }
-        guard codexInstalled, codexLoggedIn else { return }
+        guard codexInstalled, codexLoggedIn else { return .skipped }
         codexUsage = Self.retryingFetchUsage(previous: codexUsage)
 
         do {
             let usage = try await codexService.fetchUsage()
             codexUsage = usage
-            notificationService.checkAndNotify(service: usage, threshold: alertThreshold)
+            cacheStore.save(usage)
+            notifyIfEnabled(for: usage)
+            return .success
         } catch let error as UsageError {
             switch error {
             case .rateLimited(let retryAfter):
-                scheduler.reportRateLimited(retryAfter: retryAfter)
                 let retryText = retryAfter.map { " (retry in \(Int($0))s)" } ?? ""
                 errors.append("Codex: rate limited\(retryText) - will retry automatically")
+                return .rateLimited(retryAfter: retryAfter)
             case .authExpired:
-                scheduler.resetBackoff()
                 lastPrerequisitesCheck = nil
                 errors.append(error.localizedDescription)
                 codexUsage = ServiceUsage(
                     id: "codex", displayName: "Codex", shortLabel: "CX",
                     windows: [], lastUpdated: Date(), error: error.localizedDescription
                 )
+                if let codexUsage { cacheStore.save(codexUsage) }
+                return .failure
             default:
                 errors.append(error.localizedDescription)
                 codexUsage = ServiceUsage(
                     id: "codex", displayName: "Codex", shortLabel: "CX",
                     windows: [], lastUpdated: Date(), error: error.localizedDescription
                 )
+                if let codexUsage { cacheStore.save(codexUsage) }
+                return .failure
             }
         } catch is DecodingError {
             errors.append("Codex: unexpected API response format")
+            return .failure
         } catch {
             errors.append("Codex: \(error.localizedDescription)")
+            return .failure
         }
     }
 
-    private func fetchWindsurf(preferLiveRefresh: Bool = false) async {
+    private func fetchWindsurf(preferLiveRefresh: Bool = false) async -> RefreshResult {
         guard showWindsurf else {
             windsurfUsage = nil
-            return
+            return .skipped
         }
-        guard windsurfInstalled, windsurfLoggedIn else { return }
+        guard windsurfInstalled, windsurfLoggedIn else { return .skipped }
 
         do {
             let usage = try await windsurfService.fetchUsage(preferLiveRefresh: preferLiveRefresh)
             windsurfUsage = usage
+            cacheStore.save(usage)
             if let error = usage.error {
                 errors.append(error)
             } else {
-                notificationService.checkAndNotify(service: usage, threshold: alertThreshold)
+                notifyIfEnabled(for: usage)
             }
+            return .success
         } catch let error as UsageError {
             errors.append(error.localizedDescription)
             windsurfUsage = Self.windsurfFailureUsage(
                 message: error.localizedDescription,
                 previous: windsurfUsage
             )
+            if let windsurfUsage { cacheStore.save(windsurfUsage) }
+            return .failure
         } catch is DecodingError {
             let message = "Windsurf: unexpected local state format"
             errors.append(message)
             windsurfUsage = Self.windsurfFailureUsage(message: message, previous: windsurfUsage)
+            if let windsurfUsage { cacheStore.save(windsurfUsage) }
+            return .failure
         } catch {
             let message = "Windsurf: \(error.localizedDescription)"
             errors.append(message)
             windsurfUsage = Self.windsurfFailureUsage(message: message, previous: windsurfUsage)
-        }
-    }
-
-    private func updateLaunchAtLogin() {
-        if launchAtLogin {
-            try? SMAppService.mainApp.register()
-        } else {
-            try? SMAppService.mainApp.unregister()
+            if let windsurfUsage { cacheStore.save(windsurfUsage) }
+            return .failure
         }
     }
 
@@ -407,5 +528,38 @@ final class UsageViewModel: ObservableObject {
             loggedIn: ready,
             error: ready ? nil : "Claude Code not installed"
         )
+    }
+
+    private func notifyIfEnabled(for usage: ServiceUsage) {
+        guard notificationsEnabled else { return }
+        notificationService.checkAndNotify(service: usage, threshold: alertThreshold)
+    }
+
+    private func restoreCachedUsage() {
+        claudeUsage = cacheStore.load(id: "claude")
+        codexUsage = cacheStore.load(id: "codex")
+        windsurfUsage = cacheStore.load(id: "windsurf")
+    }
+
+    private func syncLaunchAtLoginState() {
+        launchAtLogin = launchAtLoginController.currentStatus()
+    }
+
+    private func menuBarSummary(for usage: ServiceUsage?, visible: Bool) -> String? {
+        guard visible, let usage else { return nil }
+        if let error = usage.error {
+            return "\(usage.displayName) unavailable: \(error)"
+        }
+
+        let windowSummary = usage.windows.map {
+            "\($0.name) \($0.remainingPercent) percent remaining"
+        }
+        .joined(separator: ", ")
+
+        guard !windowSummary.isEmpty else {
+            return "\(usage.displayName) status unavailable"
+        }
+
+        return "\(usage.displayName): \(windowSummary)"
     }
 }

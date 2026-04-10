@@ -3,6 +3,92 @@ import XCTest
 
 @MainActor
 final class UsageViewModelTests: XCTestCase {
+    func testNextPollingIntervalUsesLongestRateLimitDelay() {
+        let interval = UsageViewModel.nextPollingInterval(
+            baseInterval: 300,
+            results: [
+                .success,
+                .rateLimited(retryAfter: 45),
+                .rateLimited(retryAfter: nil)
+            ]
+        )
+
+        XCTAssertEqual(interval, 600)
+    }
+
+    func testNextPollingIntervalFallsBackToBaseWhenNoRateLimitsOccur() {
+        let interval = UsageViewModel.nextPollingInterval(
+            baseInterval: 300,
+            results: [.success, .failure, .skipped]
+        )
+
+        XCTAssertEqual(interval, 300)
+    }
+
+    func testInitSynchronizesLaunchAtLoginStateFromSystemController() {
+        let launchController = TestLaunchAtLoginController(isEnabled: true)
+
+        let viewModel = UsageViewModel(
+            notificationService: NotificationService(
+                requestPermissionHandler: { completion in completion(true) },
+                configureAuthorizationHandler: { _ in }
+            ),
+            launchAtLoginController: launchController,
+            autostart: false
+        )
+
+        XCTAssertTrue(viewModel.launchAtLogin)
+    }
+
+    func testSetLaunchAtLoginKeepsStoredValueInSyncWhenControllerThrows() {
+        let launchController = TestLaunchAtLoginController(
+            isEnabled: true,
+            setEnabledError: LaunchAtLoginControllerError.operationFailed
+        )
+
+        let viewModel = UsageViewModel(
+            notificationService: NotificationService(
+                requestPermissionHandler: { completion in completion(true) },
+                configureAuthorizationHandler: { _ in }
+            ),
+            launchAtLoginController: launchController,
+            autostart: false
+        )
+        viewModel.errors.removeAll()
+
+        viewModel.setLaunchAtLogin(false)
+
+        XCTAssertTrue(viewModel.launchAtLogin)
+        XCTAssertEqual(viewModel.errors.last, "Launch at Login: unable to update login item (operationFailed)")
+    }
+
+    func testNotificationsAreRequestedOnlyWhenExplicitlyEnabled() {
+        UserDefaults.standard.removeObject(forKey: "notificationsEnabled")
+
+        var requestCount = 0
+        let notificationService = NotificationService(
+            requestPermissionHandler: { completion in
+                requestCount += 1
+                completion(true)
+            },
+            configureAuthorizationHandler: { _ in }
+        )
+
+        let viewModel = UsageViewModel(
+            notificationService: notificationService,
+            launchAtLoginController: TestLaunchAtLoginController(isEnabled: false),
+            autostart: false
+        )
+
+        XCTAssertFalse(viewModel.notificationsEnabled)
+        XCTAssertEqual(requestCount, 0)
+
+        viewModel.setNotificationsEnabled(true)
+
+        XCTAssertTrue(viewModel.notificationsEnabled)
+        XCTAssertEqual(requestCount, 1)
+    }
+
     func testGlobalErrorsExcludeServiceSpecificErrors() {
         let windsurf = ServiceUsage(
             id: "windsurf",
@@ -85,7 +171,7 @@ final class UsageViewModelTests: XCTestCase {
         XCTAssertNil(status.error)
     }
 
-    func testManualRefreshInvalidatesClaudeCredentialCache() async {
+    func testManualRefreshDoesNotInvalidateClaudeCredentialCache() async {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("claude-manual-refresh-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -107,7 +193,7 @@ final class UsageViewModelTests: XCTestCase {
                 return (data, response)
             },
             cliExecutor: { _, _ in .init(exitCode: 1, output: "") },
-            claudeBinaryLocator: { false }
+            claudeBinaryLocator: { nil }
         )
 
         let viewModel = UsageViewModel(
@@ -122,6 +208,374 @@ final class UsageViewModelTests: XCTestCase {
 
         await viewModel.performManualRefresh(forceLiveWindsurf: false)
 
-        XCTAssertEqual(invalidationCount, 1)
+        XCTAssertEqual(invalidationCount, 0)
+    }
+
+    func testAutostartDefersProtectedResourceChecksUntilManualRefresh() async throws {
+        UserDefaults.standard.set(true, forKey: "showClaude")
+        UserDefaults.standard.set(true, forKey: "showCodex")
+        UserDefaults.standard.set(true, forKey: "showWindsurf")
+
+        let claudeUsage = ServiceUsage(
+            id: "claude",
+            displayName: "Claude Code",
+            shortLabel: "CC",
+            windows: [UsageWindow(id: "five_hour", name: "5-Hour", compactLabel: "5h", utilization: 0.2, resetTime: nil)],
+            lastUpdated: .distantPast,
+            error: nil
+        )
+        let codexUsage = ServiceUsage(
+            id: "codex",
+            displayName: "Codex",
+            shortLabel: "CX",
+            windows: [UsageWindow(id: "five_hour", name: "5-Hour", compactLabel: "5h", utilization: 0.3, resetTime: nil)],
+            lastUpdated: .distantPast,
+            error: nil
+        )
+        let windsurfUsage = ServiceUsage(
+            id: "windsurf",
+            displayName: "Windsurf",
+            shortLabel: "W",
+            windows: [UsageWindow(id: "daily", name: "Daily", compactLabel: "d", utilization: 0.1, resetTime: nil)],
+            lastUpdated: .distantPast,
+            error: nil
+        )
+
+        let claudeService = ClaudeUsageSpy(usage: claudeUsage)
+        let codexService = CodexUsageSpy(usage: codexUsage)
+        let windsurfService = WindsurfUsageSpy(usage: windsurfUsage)
+
+        let viewModel = UsageViewModel(
+            claudeService: claudeService,
+            codexService: codexService,
+            windsurfService: windsurfService,
+            notificationService: NotificationService(
+                requestPermissionHandler: { completion in completion(false) },
+                configureAuthorizationHandler: { _ in }
+            ),
+            scheduler: PollingScheduler(interval: 0.01),
+            autostart: true
+        )
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let initialClaudeCounts = await claudeService.snapshot()
+        let initialCodexCounts = await codexService.snapshot()
+        let initialWindsurfCounts = await windsurfService.snapshot()
+
+        XCTAssertEqual(initialClaudeCounts.checkInstalledCallCount, 0)
+        XCTAssertEqual(initialClaudeCounts.hasCredentialFileCallCount, 0)
+        XCTAssertEqual(initialClaudeCounts.fetchUsageCallCount, 0)
+        XCTAssertEqual(initialCodexCounts.checkInstalledCallCount, 0)
+        XCTAssertEqual(initialCodexCounts.isLoggedInCallCount, 0)
+        XCTAssertEqual(initialCodexCounts.fetchUsageCallCount, 0)
+        XCTAssertEqual(initialWindsurfCounts.checkInstalledCallCount, 0)
+        XCTAssertEqual(initialWindsurfCounts.isLoggedInCallCount, 0)
+        XCTAssertTrue(initialWindsurfCounts.fetchUsageArguments.isEmpty)
+
+        await viewModel.performManualRefresh(forceLiveWindsurf: false)
+
+        let finalClaudeCounts = await claudeService.snapshot()
+        let finalCodexCounts = await codexService.snapshot()
+        let finalWindsurfCounts = await windsurfService.snapshot()
+
+        XCTAssertGreaterThan(finalClaudeCounts.checkInstalledCallCount, 0)
+        XCTAssertGreaterThan(finalClaudeCounts.fetchUsageCallCount, 0)
+        XCTAssertGreaterThan(finalCodexCounts.checkInstalledCallCount, 0)
+        XCTAssertGreaterThan(finalCodexCounts.fetchUsageCallCount, 0)
+        XCTAssertGreaterThan(finalWindsurfCounts.checkInstalledCallCount, 0)
+        XCTAssertEqual(finalWindsurfCounts.fetchUsageArguments, [false])
+    }
+
+    func testManualRefreshButtonDoesNotForceLiveWindsurf() async throws {
+        let claudeService = ClaudeUsageSpy(
+            usage: ServiceUsage(
+                id: "claude",
+                displayName: "Claude Code",
+                shortLabel: "CC",
+                windows: [],
+                lastUpdated: .distantPast,
+                error: nil
+            )
+        )
+        let codexService = CodexUsageSpy(
+            usage: ServiceUsage(
+                id: "codex",
+                displayName: "Codex",
+                shortLabel: "CX",
+                windows: [],
+                lastUpdated: .distantPast,
+                error: nil
+            )
+        )
+        let windsurfService = WindsurfUsageSpy(
+            usage: ServiceUsage(
+                id: "windsurf",
+                displayName: "Windsurf",
+                shortLabel: "W",
+                windows: [],
+                lastUpdated: .distantPast,
+                error: nil
+            )
+        )
+
+        let viewModel = UsageViewModel(
+            claudeService: claudeService,
+            codexService: codexService,
+            windsurfService: windsurfService,
+            autostart: false
+        )
+
+        viewModel.showClaude = false
+        viewModel.showCodex = false
+        viewModel.showWindsurf = true
+
+        viewModel.manualRefresh()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let finalClaudeCounts = await claudeService.snapshot()
+        let finalWindsurfCounts = await windsurfService.snapshot()
+
+        XCTAssertEqual(finalClaudeCounts.invalidateCredentialCacheCallCount, 0)
+        XCTAssertEqual(finalWindsurfCounts.fetchUsageArguments, [false])
+    }
+
+    func testDisplayedServicesShowWaitingPlaceholdersBeforeFirstRefresh() {
+        let viewModel = UsageViewModel(
+            cacheStore: InMemoryUsageCacheStore(),
+            autostart: false
+        )
+        viewModel.showClaude = true
+        viewModel.showCodex = true
+        viewModel.showWindsurf = true
+
+        let services = viewModel.displayedServices
+
+        XCTAssertEqual(services.map(\.id), ["claude", "codex", "windsurf"])
+        XCTAssertEqual(
+            services.map(\.error),
+            Array(repeating: "Click Refresh to load usage.", count: 3)
+        )
+    }
+
+    func testInitLoadsCachedServiceUsageBeforeFirstRefresh() {
+        let cacheStore = InMemoryUsageCacheStore()
+        let cachedClaude = ServiceUsage(
+            id: "claude",
+            displayName: "Claude Code",
+            shortLabel: "CC",
+            windows: [
+                UsageWindow(id: "five_hour", name: "5-Hour", compactLabel: "5h", utilization: 0.2, resetTime: nil)
+            ],
+            lastUpdated: Date(timeIntervalSince1970: 1_700_000_000),
+            error: nil
+        )
+        cacheStore.save(cachedClaude)
+
+        let viewModel = UsageViewModel(
+            cacheStore: cacheStore,
+            autostart: false
+        )
+        viewModel.showClaude = true
+        viewModel.showCodex = false
+        viewModel.showWindsurf = false
+
+        XCTAssertEqual(viewModel.claudeUsage?.id, "claude")
+        XCTAssertEqual(viewModel.claudeUsage?.primaryWindow?.remainingPercent, 80)
+        XCTAssertEqual(viewModel.displayedServices.map(\.id), ["claude"])
+        XCTAssertNil(viewModel.displayedServices.first?.error)
+    }
+
+    func testUserDefaultsCacheStoreRoundTripsServiceUsage() {
+        let suiteName = "UsageViewModelTests.\(#function).\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            userDefaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let cacheStore = UserDefaultsUsageCacheStore(userDefaults: userDefaults)
+        let usage = ServiceUsage(
+            id: "codex",
+            displayName: "Codex",
+            shortLabel: "CX",
+            windows: [
+                UsageWindow(id: "five_hour", name: "5-Hour", compactLabel: "5h", utilization: 0.35, resetTime: nil)
+            ],
+            lastUpdated: Date(timeIntervalSince1970: 1_700_000_100),
+            error: nil,
+            footerLines: ["Updated from cache"]
+        )
+
+        cacheStore.save(usage)
+
+        let restored = cacheStore.load(id: "codex")
+
+        XCTAssertEqual(restored?.id, "codex")
+        XCTAssertEqual(restored?.primaryWindow?.remainingPercent, 65)
+        XCTAssertEqual(restored?.footerLines, ["Updated from cache"])
+    }
+}
+
+private enum LaunchAtLoginControllerError: Error {
+    case operationFailed
+}
+
+private final class TestLaunchAtLoginController: LaunchAtLoginControlling {
+    private(set) var isEnabled: Bool
+    private let setEnabledError: Error?
+
+    init(isEnabled: Bool, setEnabledError: Error? = nil) {
+        self.isEnabled = isEnabled
+        self.setEnabledError = setEnabledError
+    }
+
+    func currentStatus() -> Bool {
+        isEnabled
+    }
+
+    func setEnabled(_ enabled: Bool) throws {
+        if let setEnabledError {
+            throw setEnabledError
+        }
+        isEnabled = enabled
+    }
+}
+
+private actor ClaudeUsageSpy: ClaudeUsageServing {
+    struct Snapshot {
+        let fetchUsageCallCount: Int
+        let checkInstalledCallCount: Int
+        let hasCredentialFileCallCount: Int
+        let invalidateCredentialCacheCallCount: Int
+    }
+
+    private let usage: ServiceUsage
+    private(set) var fetchUsageCallCount = 0
+    private(set) var checkInstalledCallCount = 0
+    private(set) var hasCredentialFileCallCount = 0
+    private(set) var invalidateCredentialCacheCallCount = 0
+
+    init(usage: ServiceUsage) {
+        self.usage = usage
+    }
+
+    func fetchUsage() async throws -> ServiceUsage {
+        fetchUsageCallCount += 1
+        return usage
+    }
+
+    func checkInstalled() async -> Bool {
+        checkInstalledCallCount += 1
+        return true
+    }
+
+    func hasCredentialFile() async -> Bool {
+        hasCredentialFileCallCount += 1
+        return true
+    }
+
+    func invalidateCredentialCache() async {
+        invalidateCredentialCacheCallCount += 1
+    }
+
+    func snapshot() -> Snapshot {
+        Snapshot(
+            fetchUsageCallCount: fetchUsageCallCount,
+            checkInstalledCallCount: checkInstalledCallCount,
+            hasCredentialFileCallCount: hasCredentialFileCallCount,
+            invalidateCredentialCacheCallCount: invalidateCredentialCacheCallCount
+        )
+    }
+}
+
+private actor CodexUsageSpy: CodexUsageServing {
+    struct Snapshot {
+        let fetchUsageCallCount: Int
+        let checkInstalledCallCount: Int
+        let isLoggedInCallCount: Int
+    }
+
+    private let usage: ServiceUsage
+    private(set) var fetchUsageCallCount = 0
+    private(set) var checkInstalledCallCount = 0
+    private(set) var isLoggedInCallCount = 0
+
+    init(usage: ServiceUsage) {
+        self.usage = usage
+    }
+
+    func fetchUsage() async throws -> ServiceUsage {
+        fetchUsageCallCount += 1
+        return usage
+    }
+
+    func checkInstalled() async -> Bool {
+        checkInstalledCallCount += 1
+        return true
+    }
+
+    func isLoggedIn() async -> Bool {
+        isLoggedInCallCount += 1
+        return true
+    }
+
+    func snapshot() -> Snapshot {
+        Snapshot(
+            fetchUsageCallCount: fetchUsageCallCount,
+            checkInstalledCallCount: checkInstalledCallCount,
+            isLoggedInCallCount: isLoggedInCallCount
+        )
+    }
+}
+
+private actor WindsurfUsageSpy: WindsurfUsageServing {
+    struct Snapshot {
+        let checkInstalledCallCount: Int
+        let isLoggedInCallCount: Int
+        let fetchUsageArguments: [Bool]
+    }
+
+    private let usage: ServiceUsage
+    private(set) var checkInstalledCallCount = 0
+    private(set) var isLoggedInCallCount = 0
+    private(set) var fetchUsageArguments: [Bool] = []
+
+    init(usage: ServiceUsage) {
+        self.usage = usage
+    }
+
+    func fetchUsage(preferLiveRefresh: Bool) async throws -> ServiceUsage {
+        fetchUsageArguments.append(preferLiveRefresh)
+        return usage
+    }
+
+    func checkInstalled() async -> Bool {
+        checkInstalledCallCount += 1
+        return true
+    }
+
+    func isLoggedIn() async -> Bool {
+        isLoggedInCallCount += 1
+        return true
+    }
+
+    func snapshot() -> Snapshot {
+        Snapshot(
+            checkInstalledCallCount: checkInstalledCallCount,
+            isLoggedInCallCount: isLoggedInCallCount,
+            fetchUsageArguments: fetchUsageArguments
+        )
+    }
+}
+
+private final class InMemoryUsageCacheStore: UsageCacheStoring {
+    private var values: [String: ServiceUsage] = [:]
+
+    func load(id: String) -> ServiceUsage? {
+        values[id]
+    }
+
+    func save(_ usage: ServiceUsage) {
+        values[usage.id] = usage
     }
 }

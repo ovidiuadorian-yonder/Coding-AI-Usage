@@ -1,7 +1,14 @@
+import AppKit
 import XCTest
 @testable import CodingAIUsage
 
 final class MenuBarLabelTests: XCTestCase {
+    func testForegroundColorTracksWorstUsageLevel() {
+        XCTAssertEqual(MenuBarLabel.foregroundColor(for: .normal), NSColor.labelColor)
+        XCTAssertEqual(MenuBarLabel.foregroundColor(for: .warning), NSColor.systemOrange)
+        XCTAssertEqual(MenuBarLabel.foregroundColor(for: .critical), NSColor.systemRed)
+    }
+
     func testUsageWindowCompactLabelsDriveMenuText() {
         let claude = ServiceUsage(
             id: "claude",

@@ -10,6 +10,7 @@ private final class CallCounter: @unchecked Sendable {
 }
 
 final class ClaudeUsageTests: XCTestCase {
+    @MainActor
     func testClaudeCheckInstalledFindsUserLocalBinaryWithoutPATH() async throws {
         let localClaudePath = NSHomeDirectory() + "/.local/bin/claude"
         guard FileManager.default.isExecutableFile(atPath: localClaudePath) else {
@@ -106,7 +107,7 @@ final class ClaudeUsageTests: XCTestCase {
                     """
                 )
             },
-            claudeBinaryLocator: { true }
+            claudeBinaryLocator: { "/stub/claude" }
         )
 
         let usage = try await service.fetchUsage()
@@ -146,7 +147,7 @@ final class ClaudeUsageTests: XCTestCase {
                 XCTFail("CLI should not be used when file credentials exist")
                 return .init(exitCode: 1, output: "")
             },
-            claudeBinaryLocator: { false }
+            claudeBinaryLocator: { nil }
         )
 
         let usage = try await service.fetchUsage()
@@ -189,13 +190,84 @@ final class ClaudeUsageTests: XCTestCase {
                 XCTFail("CLI should not be used when file credentials exist")
                 return .init(exitCode: 1, output: "")
             },
-            claudeBinaryLocator: { false }
+            claudeBinaryLocator: { nil }
         )
 
         let usage = try await service.fetchUsage()
 
         XCTAssertEqual(usage.fiveHourWindow?.remainingPercent, 90)
         XCTAssertEqual(usageCalls.value, 2)
+    }
+
+    @MainActor
+    func testClaudeUsageServiceDoesNotTriggerShellStartupForCLIProbe() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-cli-shell-\(UUID().uuidString)", isDirectory: true)
+        let zdotDir = tempDir.appendingPathComponent("zdot", isDirectory: true)
+        let markerFile = tempDir.appendingPathComponent("shell-startup-marker")
+        let fakeClaude = tempDir.appendingPathComponent("claude")
+
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: zdotDir, withIntermediateDirectories: true)
+
+        let script = """
+        #!/bin/sh
+        cat <<'EOF'
+        Current session
+        20% used
+        Current week (all models)
+        60% left
+        EOF
+        """
+        try script.write(to: fakeClaude, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: fakeClaude.path
+        )
+
+        // A zsh startup file that creates a marker — should never be sourced since the executor
+        // runs the binary directly (not via `zsh -lc`).
+        let zshEnv = """
+        touch "\(markerFile.path)"
+        """
+        try zshEnv.write(
+            to: zdotDir.appendingPathComponent(".zshenv"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let originalZdotDir = ProcessInfo.processInfo.environment["ZDOTDIR"]
+        setenv("ZDOTDIR", zdotDir.path, 1)
+        defer {
+            if let originalZdotDir {
+                setenv("ZDOTDIR", originalZdotDir, 1)
+            } else {
+                unsetenv("ZDOTDIR")
+            }
+        }
+
+        let loader = ClaudeCredentialLoader(
+            homeDirectory: tempDir.path,
+            keychainService: .empty
+        )
+        // Inject the absolute path directly so the executor runs fakeClaude without PATH lookup.
+        let service = ClaudeUsageService(
+            credentialLoader: loader,
+            networkClient: { _ in
+                XCTFail("API should not be called when CLI succeeds")
+                throw UsageError.invalidResponse
+            },
+            claudeBinaryLocator: { fakeClaude.path }
+        )
+
+        let usage = try await service.fetchUsage()
+
+        XCTAssertEqual(usage.fiveHourWindow?.remainingPercent, 80)
+        XCTAssertEqual(usage.weeklyWindow?.remainingPercent, 60)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: markerFile.path),
+            "CLI execution should not source shell startup files"
+        )
     }
 
     func testClaudeReauthAppleScriptEscapesCommandQuotes() {

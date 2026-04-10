@@ -5,6 +5,22 @@ enum UsageLevel: Comparable {
     case warning
     case critical
 
+    var statusText: String {
+        switch self {
+        case .normal: return "Healthy"
+        case .warning: return "Low"
+        case .critical: return "Critical"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .normal: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.circle.fill"
+        case .critical: return "exclamationmark.triangle.fill"
+        }
+    }
+
     var color: Color {
         switch self {
         case .normal: return .green
@@ -14,7 +30,7 @@ enum UsageLevel: Comparable {
     }
 }
 
-struct UsageWindow: Identifiable {
+struct UsageWindow: Identifiable, Codable {
     let id: String
     let name: String
     let compactLabel: String
@@ -50,7 +66,7 @@ struct UsageWindow: Identifiable {
     }
 }
 
-struct ServiceUsage: Identifiable {
+struct ServiceUsage: Identifiable, Codable {
     let id: String
     let displayName: String
     let shortLabel: String

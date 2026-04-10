@@ -24,7 +24,33 @@ struct MenuBarLabel: View {
     }
 
     var body: some View {
-        Image(nsImage: renderMenuBarImage())
+        Label {
+            Text(viewModel.menuBarPlainText)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .lineLimit(1)
+        } icon: {
+            Image(systemName: menuBarSymbolName)
+                .imageScale(.small)
+        }
+        .foregroundStyle(Color(nsColor: menuBarForegroundColor))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(viewModel.menuBarAccessibilityLabel)
+        .help(viewModel.menuBarAccessibilityLabel)
+    }
+
+    private var menuBarForegroundColor: NSColor {
+        Self.foregroundColor(for: viewModel.worstLevel)
+    }
+
+    private var menuBarSymbolName: String {
+        switch viewModel.worstLevel {
+        case .critical:
+            return "exclamationmark.triangle.fill"
+        case .warning:
+            return "exclamationmark.circle.fill"
+        case .normal:
+            return "chart.bar.xaxis"
+        }
     }
 
     private func renderMenuBarImage() -> NSImage {
@@ -141,6 +167,17 @@ struct MenuBarLabel: View {
             return NSColor(red: 0.0, green: 0.47, blue: 0.84, alpha: 1.0)
         default:
             return .controlAccentColor
+        }
+    }
+
+    static func foregroundColor(for level: UsageLevel) -> NSColor {
+        switch level {
+        case .critical:
+            return .systemRed
+        case .warning:
+            return .systemOrange
+        case .normal:
+            return .labelColor
         }
     }
 

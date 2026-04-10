@@ -2,59 +2,64 @@ import Foundation
 
 @MainActor
 final class PollingScheduler: ObservableObject {
+    typealias ScheduledAction = @MainActor () async -> TimeInterval?
+
     private var timer: Timer?
+    private var action: ScheduledAction?
     private var baseInterval: TimeInterval
     private var currentInterval: TimeInterval
-    private let maxInterval: TimeInterval = 1800 // 30 min cap
 
     init(interval: TimeInterval = 300) {
         self.baseInterval = interval
         self.currentInterval = interval
     }
 
-    func start(action: @escaping @MainActor () async -> Void) {
+    func start(action: @escaping ScheduledAction) {
         stop()
-        // Fire immediately on start
-        Task { @MainActor in
-            await action()
+        self.action = action
+
+        Task { @MainActor [weak self] in
+            await self?.runActionAndSchedule()
         }
-        scheduleNext(action: action)
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
-    }
-
-    func reportSuccess() {
-        currentInterval = baseInterval
-    }
-
-    func reportRateLimited(retryAfter: TimeInterval?) {
-        if let retryAfter {
-            // Cap retry-after to maxInterval to avoid absurdly long waits
-            currentInterval = min(retryAfter + 30, maxInterval)
-        } else {
-            currentInterval = min(currentInterval * 2, maxInterval)
-        }
+        action = nil
     }
 
     func resetBackoff() {
-        currentInterval = baseInterval
+        reschedule(after: baseInterval)
     }
 
     func updateBaseInterval(_ interval: TimeInterval) {
         baseInterval = interval
-        currentInterval = interval
+        if action != nil {
+            reschedule(after: interval)
+        } else {
+            currentInterval = interval
+        }
     }
 
-    private func scheduleNext(action: @escaping @MainActor () async -> Void) {
+    func reschedule(after interval: TimeInterval?) {
+        currentInterval = interval ?? baseInterval
+        guard action != nil else { return }
+        scheduleTimer(after: currentInterval)
+    }
+
+    private func runActionAndSchedule() async {
+        guard let action else { return }
+        let nextInterval = await action() ?? baseInterval
+        scheduleTimer(after: nextInterval)
+    }
+
+    private func scheduleTimer(after interval: TimeInterval) {
         timer?.invalidate()
+        currentInterval = interval
         timer = Timer.scheduledTimer(withTimeInterval: currentInterval, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                await action()
-                self.scheduleNext(action: action)
+                await self?.runActionAndSchedule()
             }
         }
     }

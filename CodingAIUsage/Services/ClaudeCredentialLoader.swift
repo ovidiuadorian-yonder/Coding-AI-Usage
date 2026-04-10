@@ -17,11 +17,6 @@ struct ClaudeCredentialCacheState {
     let cachedAccessToken: String?
     let cachedAt: Date?
     let cacheTTL: TimeInterval
-
-    func isExpired(referenceDate: Date) -> Bool {
-        guard let cachedAt else { return true }
-        return referenceDate.timeIntervalSince(cachedAt) > cacheTTL
-    }
 }
 
 final class ClaudeCredentialLoader {
@@ -174,6 +169,8 @@ final class ClaudeCredentialLoader {
         ]
     }
 
+    // The cache holds a single credential slot. `allowingFiles`/`allowingKeychain` filter whether
+    // the cached slot matches what the caller is looking for — they do not select from separate pools.
     private func cachedCredentials(
         allowingFiles: Bool,
         allowingKeychain: Bool,
@@ -183,16 +180,22 @@ final class ClaudeCredentialLoader {
         defer { lock.unlock() }
 
         guard !forceRefresh,
-              let cachedCredentials,
-              let cachedAt,
-              now().timeIntervalSince(cachedAt) <= cacheTTL else {
+              let cachedCredentials else {
             return nil
         }
 
         switch cachedCredentials.source {
         case .file:
+            // File credentials are re-read every cacheTTL seconds to pick up external token refreshes.
+            guard let cachedAt,
+                  now().timeIntervalSince(cachedAt) <= cacheTTL else {
+                return nil
+            }
             return allowingFiles ? cachedCredentials : nil
         case .keychain:
+            // Keychain credentials are not TTL-evicted — they remain cached until auth fails (401),
+            // at which point the caller refreshes and re-caches. This avoids repeated Keychain reads
+            // on every poll interval.
             return allowingKeychain ? cachedCredentials : nil
         }
     }

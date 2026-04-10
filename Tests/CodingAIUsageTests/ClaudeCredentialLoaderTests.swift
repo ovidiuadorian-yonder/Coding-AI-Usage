@@ -90,10 +90,58 @@ final class ClaudeCredentialLoaderTests: XCTestCase {
         XCTAssertEqual(loader.cacheState.cachedAccessToken, "file-token")
 
         now = now.addingTimeInterval(301)
-        XCTAssertTrue(loader.cacheState.isExpired(referenceDate: now))
         _ = try loader.loadAnyCredentials()
 
         XCTAssertEqual(loader.cacheState.cachedAccessToken, "file-token")
+    }
+
+    func testKeychainCredentialsRemainCachedAcrossPollInterval() throws {
+        var readCount = 0
+        var now = Date(timeIntervalSince1970: 1_000)
+        let loader = ClaudeCredentialLoader(
+            homeDirectory: makeTempDirectory().path,
+            keychainService: KeychainService(
+                currentUsername: { "tester" },
+                credentialReader: { _, _ in
+                    readCount += 1
+                    return self.credentialsJSON(accessToken: "keychain-token")
+                },
+                hashedServiceNameFinder: { "Claude Code-credentials" }
+            ),
+            now: { now },
+            cacheTTL: 300
+        )
+
+        let first = try loader.loadKeychainCredentials()
+        now = now.addingTimeInterval(301)
+        let second = try loader.loadKeychainCredentials()
+
+        XCTAssertEqual(first?.accessToken, "keychain-token")
+        XCTAssertEqual(second?.accessToken, "keychain-token")
+        XCTAssertEqual(readCount, 1, "Keychain should not be re-read on each polling refresh")
+    }
+
+    func testKeychainCredentialsAreReReadAfterCacheInvalidation() throws {
+        var readCount = 0
+        let loader = ClaudeCredentialLoader(
+            homeDirectory: makeTempDirectory().path,
+            keychainService: KeychainService(
+                currentUsername: { "tester" },
+                credentialReader: { _, _ in
+                    readCount += 1
+                    return self.credentialsJSON(accessToken: "keychain-token")
+                },
+                hashedServiceNameFinder: { "Claude Code-credentials" }
+            )
+        )
+
+        _ = try loader.loadKeychainCredentials()
+        XCTAssertEqual(readCount, 1)
+
+        loader.invalidateCache()
+        _ = try loader.loadKeychainCredentials()
+
+        XCTAssertEqual(readCount, 2, "Keychain should be re-read after cache invalidation (401 path)")
     }
 
     func testInvalidateCacheClearsCachedCredentials() throws {

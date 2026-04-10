@@ -36,14 +36,19 @@ struct WindowRow: View {
     let window: UsageWindow
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(window.name)
                     .font(.subheadline)
                 Spacer()
-                Text("\(window.remainingPercent)% remaining")
-                    .font(.subheadline)
-                    .foregroundColor(window.level == .critical ? .red : .green)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(window.remainingPercent)% remaining")
+                        .font(.subheadline)
+                        .monospacedDigit()
+                    Label(window.level.statusText, systemImage: window.level.symbolName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(window.level.color)
+                }
             }
 
             ProgressView(value: window.remaining)
@@ -55,5 +60,7 @@ struct WindowRow: View {
                     .foregroundColor(.secondary)
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(window.name), \(window.remainingPercent)% remaining, \(window.level.statusText)")
     }
 }

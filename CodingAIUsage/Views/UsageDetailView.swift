@@ -41,21 +41,15 @@ struct UsageDetailView: View {
                     Image(systemName: "info.circle")
                 }
                 .buttonStyle(.borderless)
+                .accessibilityLabel("About Coding AI Usage")
+                .help("Open app information")
             }
 
             Divider()
 
             // Service usage details
-            if let claude = viewModel.claudeUsage, viewModel.showClaude {
-                serviceSection(for: claude)
-            }
-
-            if let codex = viewModel.codexUsage, viewModel.showCodex {
-                serviceSection(for: codex)
-            }
-
-            if let windsurf = viewModel.windsurfUsage, viewModel.showWindsurf {
-                serviceSection(for: windsurf)
+            ForEach(viewModel.displayedServices) { usage in
+                serviceSection(for: usage)
             }
 
             if !viewModel.showClaude && !viewModel.showCodex && !viewModel.showWindsurf {
@@ -89,21 +83,24 @@ struct UsageDetailView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
                 .disabled(viewModel.isRefreshing)
+                .help("Refresh usage now")
 
                 Spacer()
 
                 Button(action: { activePanel = .settings }) {
                     Label("Settings", systemImage: "gear")
                 }
+                .help("Open settings")
 
                 Button(action: { NSApplication.shared.terminate(nil) }) {
                     Label("Exit", systemImage: "xmark.circle")
                 }
+                .help("Quit Coding AI Usage")
             }
             .buttonStyle(.borderless)
         }
         .padding()
-        .frame(width: 320)
+        .frame(minWidth: 320, idealWidth: 340, maxWidth: 420, alignment: .leading)
     }
 
     private func serviceSection(for usage: ServiceUsage) -> some View {
