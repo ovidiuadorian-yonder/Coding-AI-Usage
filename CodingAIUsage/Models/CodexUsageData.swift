@@ -58,12 +58,14 @@ struct CodexUsageResponse: Codable {
         }
     }
 
-    func toServiceUsage() -> ServiceUsage {
+    func toServiceUsage(now: Date = Date()) -> ServiceUsage {
         var windows: [UsageWindow] = []
 
         if let primary = rateLimit?.primaryWindow {
             let utilization = Double(primary.usedPercent) / 100.0
-            let resetTime = primary.resetAt.map { Date(timeIntervalSince1970: Double($0)) }
+            let resetTime =
+                primary.resetAt.map { Date(timeIntervalSince1970: Double($0)) } ??
+                primary.resetAfterSeconds.map { now.addingTimeInterval(Double($0)) }
             windows.append(UsageWindow(
                 id: "five_hour",
                 name: "5-Hour",
@@ -75,7 +77,9 @@ struct CodexUsageResponse: Codable {
 
         if let secondary = rateLimit?.secondaryWindow {
             let utilization = Double(secondary.usedPercent) / 100.0
-            let resetTime = secondary.resetAt.map { Date(timeIntervalSince1970: Double($0)) }
+            let resetTime =
+                secondary.resetAt.map { Date(timeIntervalSince1970: Double($0)) } ??
+                secondary.resetAfterSeconds.map { now.addingTimeInterval(Double($0)) }
             windows.append(UsageWindow(
                 id: "seven_day",
                 name: "Weekly",

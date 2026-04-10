@@ -211,6 +211,72 @@ final class UsageViewModelTests: XCTestCase {
         XCTAssertEqual(invalidationCount, 0)
     }
 
+    func testClaudeDecodeFailurePreservesCachedHealthySnapshot() async {
+        let cacheStore = InMemoryUsageCacheStore()
+        cacheStore.save(
+            ServiceUsage(
+                id: "claude",
+                displayName: "Claude Code",
+                shortLabel: "CC",
+                windows: [
+                    UsageWindow(id: "five_hour", name: "5-Hour", compactLabel: "5h", utilization: 0.2, resetTime: nil)
+                ],
+                lastUpdated: .distantPast,
+                error: nil
+            )
+        )
+
+        let viewModel = UsageViewModel(
+            claudeService: ClaudeFailingUsageSpy(error: Self.decodingError()),
+            cacheStore: cacheStore,
+            autostart: false
+        )
+        viewModel.showClaude = true
+        viewModel.showCodex = false
+        viewModel.showWindsurf = false
+
+        await viewModel.performManualRefresh(forceLiveWindsurf: false)
+
+        // In-memory state surfaces the error for display
+        XCTAssertEqual(viewModel.claudeUsage?.error, "Claude Code: unexpected API response format")
+        // Cache still holds the last successful snapshot — not overwritten by the transient failure
+        XCTAssertNil(cacheStore.load(id: "claude")?.error)
+        XCTAssertFalse(cacheStore.load(id: "claude")?.windows.isEmpty ?? true)
+    }
+
+    func testCodexDecodeFailurePreservesCachedHealthySnapshot() async {
+        let cacheStore = InMemoryUsageCacheStore()
+        cacheStore.save(
+            ServiceUsage(
+                id: "codex",
+                displayName: "Codex",
+                shortLabel: "CX",
+                windows: [
+                    UsageWindow(id: "five_hour", name: "5-Hour", compactLabel: "5h", utilization: 0.3, resetTime: nil)
+                ],
+                lastUpdated: .distantPast,
+                error: nil
+            )
+        )
+
+        let viewModel = UsageViewModel(
+            codexService: CodexFailingUsageSpy(error: Self.decodingError()),
+            cacheStore: cacheStore,
+            autostart: false
+        )
+        viewModel.showClaude = false
+        viewModel.showCodex = true
+        viewModel.showWindsurf = false
+
+        await viewModel.performManualRefresh(forceLiveWindsurf: false)
+
+        // In-memory state surfaces the error for display
+        XCTAssertEqual(viewModel.codexUsage?.error, "Codex: unexpected API response format")
+        // Cache still holds the last successful snapshot — not overwritten by the transient failure
+        XCTAssertNil(cacheStore.load(id: "codex")?.error)
+        XCTAssertFalse(cacheStore.load(id: "codex")?.windows.isEmpty ?? true)
+    }
+
     func testAutostartDefersProtectedResourceChecksUntilManualRefresh() async throws {
         UserDefaults.standard.set(true, forKey: "showClaude")
         UserDefaults.standard.set(true, forKey: "showCodex")
@@ -414,6 +480,12 @@ final class UsageViewModelTests: XCTestCase {
         XCTAssertEqual(restored?.primaryWindow?.remainingPercent, 65)
         XCTAssertEqual(restored?.footerLines, ["Updated from cache"])
     }
+
+    private static func decodingError() -> DecodingError {
+        DecodingError.dataCorrupted(
+            .init(codingPath: [], debugDescription: "Malformed response")
+        )
+    }
 }
 
 private enum LaunchAtLoginControllerError: Error {
@@ -525,6 +597,48 @@ private actor CodexUsageSpy: CodexUsageServing {
             checkInstalledCallCount: checkInstalledCallCount,
             isLoggedInCallCount: isLoggedInCallCount
         )
+    }
+}
+
+private actor ClaudeFailingUsageSpy: ClaudeUsageServing {
+    private let error: Error
+
+    init(error: Error) {
+        self.error = error
+    }
+
+    func fetchUsage() async throws -> ServiceUsage {
+        throw error
+    }
+
+    func checkInstalled() async -> Bool {
+        true
+    }
+
+    func hasCredentialFile() async -> Bool {
+        true
+    }
+
+    func invalidateCredentialCache() async {}
+}
+
+private actor CodexFailingUsageSpy: CodexUsageServing {
+    private let error: Error
+
+    init(error: Error) {
+        self.error = error
+    }
+
+    func fetchUsage() async throws -> ServiceUsage {
+        throw error
+    }
+
+    func checkInstalled() async -> Bool {
+        true
+    }
+
+    func isLoggedIn() async -> Bool {
+        true
     }
 }
 

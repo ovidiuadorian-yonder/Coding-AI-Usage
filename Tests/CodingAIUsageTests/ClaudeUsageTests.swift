@@ -59,6 +59,26 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertNotNil(usage.weeklyWindow?.resetTime)
     }
 
+    func testClaudeUsageResponseParsesResetDatesWithoutFractionalSeconds() throws {
+        let data = Data(#"{"five_hour":{"utilization":20,"resets_at":"2026-04-03T18:00:00Z"},"seven_day":{"utilization":45,"resets_at":"2026-04-08T18:00:00Z"}}"#.utf8)
+
+        let response = try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
+        let usage = response.toServiceUsage()
+
+        XCTAssertNotNil(usage.fiveHourWindow?.resetTime)
+        XCTAssertNotNil(usage.weeklyWindow?.resetTime)
+    }
+
+    func testClaudeUsageResponseParsesMixedResetDateFormatsIndependently() throws {
+        let data = Data(#"{"five_hour":{"utilization":20,"resets_at":"2026-04-03T18:00:00Z"},"seven_day":{"utilization":45,"resets_at":"2026-04-08T18:00:00.000Z"}}"#.utf8)
+
+        let response = try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
+        let usage = response.toServiceUsage()
+
+        XCTAssertNotNil(usage.fiveHourWindow?.resetTime)
+        XCTAssertNotNil(usage.weeklyWindow?.resetTime)
+    }
+
     func testClaudeCLIUsageParserTreatsLoginPromptAsNotLoggedIn() {
         let output = "Authentication required. Please run claude login."
 

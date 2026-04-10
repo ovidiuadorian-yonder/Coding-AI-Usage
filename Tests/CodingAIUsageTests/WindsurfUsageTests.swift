@@ -4,6 +4,32 @@ import SQLite3
 @testable import CodingAIUsage
 
 final class WindsurfUsageTests: XCTestCase {
+    func testCodexUsageResponseFallsBackToRelativeResetWhenAbsoluteResetIsMissing() {
+        let response = CodexUsageResponse(
+            rateLimit: .init(
+                allowed: true,
+                limitReached: false,
+                primaryWindow: .init(
+                    usedPercent: 25,
+                    limitWindowSeconds: 18_000,
+                    resetAfterSeconds: 90,
+                    resetAt: nil
+                ),
+                secondaryWindow: nil
+            )
+        )
+
+        let before = Date()
+        let usage = response.toServiceUsage()
+        let after = Date()
+
+        let resetTime = try? XCTUnwrap(usage.primaryWindow?.resetTime)
+        XCTAssertNotNil(resetTime)
+        if let resetTime {
+            XCTAssertGreaterThanOrEqual(resetTime, before.addingTimeInterval(89))
+            XCTAssertLessThanOrEqual(resetTime, after.addingTimeInterval(91))
+        }
+    }
 
     func testManualRefreshPrefersLiveSnapshotOverCachedSnapshot() {
         let cached = WindsurfPageSnapshot(

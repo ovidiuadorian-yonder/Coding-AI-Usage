@@ -23,8 +23,8 @@ struct ClaudeUsageResponse: Codable {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
-        let fiveHourReset = fiveHour.resetsAt.flatMap { formatter.date(from: $0) }
-        let sevenDayReset = sevenDay.resetsAt.flatMap { formatter.date(from: $0) }
+        let fiveHourReset = parseResetDate(fiveHour.resetsAt, using: formatter)
+        let sevenDayReset = parseResetDate(sevenDay.resetsAt, using: formatter)
 
         return ServiceUsage(
             id: "claude",
@@ -50,5 +50,16 @@ struct ClaudeUsageResponse: Codable {
             error: nil,
             footerLines: []
         )
+    }
+
+    private func parseResetDate(_ rawValue: String?, using formatter: ISO8601DateFormatter) -> Date? {
+        guard let rawValue else { return nil }
+        if let date = formatter.date(from: rawValue) {
+            return date
+        }
+
+        let fallbackFormatter = ISO8601DateFormatter()
+        fallbackFormatter.formatOptions = [.withInternetDateTime]
+        return fallbackFormatter.date(from: rawValue)
     }
 }

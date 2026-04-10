@@ -419,14 +419,23 @@ final class UsageViewModel: ObservableObject {
                     id: "claude", displayName: "Claude Code", shortLabel: "CC",
                     windows: [], lastUpdated: Date(), error: error.localizedDescription
                 )
-                if let claudeUsage { cacheStore.save(claudeUsage) }
                 return .failure
             }
         } catch is DecodingError {
-            errors.append("Claude Code: unexpected API response format")
+            let message = "Claude Code: unexpected API response format"
+            errors.append(message)
+            claudeUsage = ServiceUsage(
+                id: "claude", displayName: "Claude Code", shortLabel: "CC",
+                windows: [], lastUpdated: Date(), error: message
+            )
             return .failure
         } catch {
-            errors.append("Claude Code: \(error.localizedDescription)")
+            let message = "Claude Code: \(error.localizedDescription)"
+            errors.append(message)
+            claudeUsage = ServiceUsage(
+                id: "claude", displayName: "Claude Code", shortLabel: "CC",
+                windows: [], lastUpdated: Date(), error: message
+            )
             return .failure
         }
     }
@@ -466,14 +475,23 @@ final class UsageViewModel: ObservableObject {
                     id: "codex", displayName: "Codex", shortLabel: "CX",
                     windows: [], lastUpdated: Date(), error: error.localizedDescription
                 )
-                if let codexUsage { cacheStore.save(codexUsage) }
                 return .failure
             }
         } catch is DecodingError {
-            errors.append("Codex: unexpected API response format")
+            let message = "Codex: unexpected API response format"
+            errors.append(message)
+            codexUsage = ServiceUsage(
+                id: "codex", displayName: "Codex", shortLabel: "CX",
+                windows: [], lastUpdated: Date(), error: message
+            )
             return .failure
         } catch {
-            errors.append("Codex: \(error.localizedDescription)")
+            let message = "Codex: \(error.localizedDescription)"
+            errors.append(message)
+            codexUsage = ServiceUsage(
+                id: "codex", displayName: "Codex", shortLabel: "CX",
+                windows: [], lastUpdated: Date(), error: message
+            )
             return .failure
         }
     }
