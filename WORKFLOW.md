@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  project_slug: "your-linear-project-slug"
+  project_slug: "ai-usage-plugin-symphony-4111b1c85ad5"
   active_states:
     - Ready
     - Todo
@@ -19,14 +19,16 @@ hooks:
   after_create: |
     git clone --depth 1 https://github.com/ovidiuadorian-yonder/Coding-AI-Usage.git .
     git config advice.detachedHead false
+  before_run: |
+    git pull --ff-only || true
 
 agent:
-  max_concurrent_agents: 3
-  max_turns: 20
+  max_concurrent_agents: 1
+  max_turns: 8
 
 codex:
   command: codex app-server
-  approval_policy: on-request
+  approval_policy: full-auto
   thread_sandbox: workspace-write
 ---
 
@@ -59,4 +61,5 @@ Validation rules:
 
 Completion rules:
 - Summarize what changed, what was verified, and any follow-up risks.
-- If blocked, leave the issue with a clear blocker summary and the next action needed from a human.
+- Transition the Linear issue to "Done" when all validation passes and work is complete.
+- If blocked, transition the Linear issue to "Todo" and leave a clear blocker summary and the next action needed from a human.

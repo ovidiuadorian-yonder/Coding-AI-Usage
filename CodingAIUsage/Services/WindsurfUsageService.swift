@@ -50,8 +50,8 @@ actor WindsurfUsageService: WindsurfUsageServing {
         let lastUpdated = Date()
 
         let persistedSnapshot = try
-            planInfo?.quotaSnapshot ??
-            readStructuredSnapshot(authStatus: authStatus, planInfo: planInfo)
+            readStructuredSnapshot(authStatus: authStatus, planInfo: planInfo) ??
+            planInfo?.quotaSnapshot
 
         let cookieState: WindsurfCookieState
         let liveSnapshot: WindsurfPageSnapshot?

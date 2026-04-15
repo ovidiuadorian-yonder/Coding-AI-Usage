@@ -111,7 +111,7 @@ final class UsageViewModel: ObservableObject {
     }
 
     func refresh(
-        forceLiveWindsurf: Bool = false,
+        forceLiveWindsurf: Bool = true,
         userInitiated: Bool = false
     ) async -> TimeInterval {
         isRefreshing = true
@@ -144,7 +144,7 @@ final class UsageViewModel: ObservableObject {
 
     func manualRefresh() {
         Task { @MainActor in
-            await performManualRefresh(forceLiveWindsurf: false)
+            await performManualRefresh(forceLiveWindsurf: true)
         }
     }
 

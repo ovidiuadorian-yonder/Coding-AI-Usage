@@ -353,7 +353,7 @@ final class UsageViewModelTests: XCTestCase {
         XCTAssertEqual(finalWindsurfCounts.fetchUsageArguments, [false])
     }
 
-    func testManualRefreshButtonDoesNotForceLiveWindsurf() async throws {
+    func testManualRefreshButtonForcesLiveWindsurf() async throws {
         let claudeService = ClaudeUsageSpy(
             usage: ServiceUsage(
                 id: "claude",
@@ -403,7 +403,7 @@ final class UsageViewModelTests: XCTestCase {
         let finalWindsurfCounts = await windsurfService.snapshot()
 
         XCTAssertEqual(finalClaudeCounts.invalidateCredentialCacheCallCount, 0)
-        XCTAssertEqual(finalWindsurfCounts.fetchUsageArguments, [false])
+        XCTAssertEqual(finalWindsurfCounts.fetchUsageArguments, [true])
     }
 
     func testDisplayedServicesShowWaitingPlaceholdersBeforeFirstRefresh() {

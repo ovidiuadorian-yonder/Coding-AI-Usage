@@ -246,6 +246,25 @@ final class WindsurfUsageTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(snapshot.planEndDate).timeIntervalSince1970, 1_776_860_739, accuracy: 1)
     }
 
+    func testUserStatusProtoParserDefaultsAbsentQuotaFieldsToZero() throws {
+        // Protobuf omits zero-valued varints from the wire format.
+        // When weekly remaining (field 15) is 0%, it's absent. The parser
+        // must treat missing fields 14/15 as 0 rather than failing.
+        let quotaMessage =
+            protoVarintField(14, 43) +
+            // field 15 intentionally absent (weekly remaining = 0)
+            protoVarintField(16, 927_067_916) +
+            protoVarintField(17, 1_776_240_000) +
+            protoVarintField(18, 1_776_585_600)
+        let root = Data(protoMessageField(9, quotaMessage))
+
+        let snapshot = try XCTUnwrap(WindsurfUserStatusProtoParser().parse(data: root))
+
+        XCTAssertEqual(snapshot.dailyUsagePercent, 57)
+        XCTAssertEqual(snapshot.weeklyUsagePercent, 100)
+        XCTAssertEqual(snapshot.extraUsageBalance, "$927.07")
+    }
+
     func testCachedPlanInfoDecodesFlexCreditFields() throws {
         let json = """
         {

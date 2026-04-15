@@ -274,13 +274,20 @@ struct WindsurfUserStatusProtoParser {
     }
 
     private func findSnapshot(in fields: [WindsurfProtobufField]) -> WindsurfPageSnapshot? {
+        // Fields 16-18 are required anchors; fields 14-15 default to 0 when absent
+        // (protobuf omits zero-valued varints from the wire format).
         if
-            let dailyRemaining = varintField(14, in: fields),
-            let weeklyRemaining = varintField(15, in: fields),
             let extraUsageMicros = varintField(16, in: fields),
             let dailyResetTimestamp = varintField(17, in: fields),
             let weeklyResetTimestamp = varintField(18, in: fields)
         {
+            let dailyRemaining = varintField(14, in: fields) ?? 0
+            let weeklyRemaining = varintField(15, in: fields) ?? 0
+
+            guard dailyRemaining <= 100, weeklyRemaining <= 100 else {
+                return nil
+            }
+
             return WindsurfPageSnapshot(
                 dailyUsagePercent: max(0, min(100, 100 - Int(dailyRemaining))),
                 weeklyUsagePercent: max(0, min(100, 100 - Int(weeklyRemaining))),
