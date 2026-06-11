@@ -108,10 +108,36 @@ final class ClaudeUsageTests: XCTestCase {
         }
     }
 
-    func testClaudeUsageServicePrefersCLIWhenCredentialFileIsUnavailable() async throws {
+    func testClaudeUsageServicePrefersKeychainAPIOverCLI() async throws {
+        let keychain = KeychainService(
+            currentUsername: { "tester" },
+            credentialReader: { _, _ in #"{"claudeAiOauth":{"accessToken":"kc-token","expiresAt":9999999999999}}"# },
+            hashedServiceNameFinder: { "Claude Code-credentials" }
+        )
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-kc-\(UUID().uuidString)", isDirectory: true)
+        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: keychain)
+        let service = ClaudeUsageService(
+            credentialLoader: loader,
+            networkClient: { request in
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                let data = Data(#"{"five_hour":{"utilization":15,"resets_at":"2026-04-03T18:00:00Z"},"seven_day":{"utilization":35}}"#.utf8)
+                return (data, response)
+            },
+            cliExecutor: { _, _ in XCTFail("CLI must not run when Keychain credentials exist"); return .init(exitCode: 1, output: "") },
+            claudeBinaryLocator: { "/stub/claude" }
+        )
+
+        let usage = try await service.fetchUsage()
+
+        XCTAssertEqual(usage.fiveHourWindow?.remainingPercent, 85)
+        XCTAssertNotNil(usage.fiveHourWindow?.resetTime, "API path restores the reset countdown")
+    }
+
+    func testClaudeUsageServiceFallsBackToCLIWhenNoFileOrKeychainCredentials() async throws {
         let loader = ClaudeCredentialLoader(
             homeDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,
-            keychainService: KeychainService()
+            keychainService: .empty
         )
 
         let service = ClaudeUsageService(

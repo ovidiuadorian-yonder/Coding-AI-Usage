@@ -59,25 +59,16 @@ actor ClaudeUsageService: ClaudeUsageServing {
             )
         }
 
-        if let claudePath = claudeBinaryLocator() {
-            do {
-                return try fetchUsageViaCLI(binaryPath: claudePath)
-            } catch let cliError as UsageError {
-                if let keychainCredentials = try credentialLoader.loadKeychainCredentials() {
-                    return try await fetchUsageViaAPI(
-                        startingWith: keychainCredentials,
-                        credentialScope: .keychain
-                    )
-                }
-                throw cliError
-            }
-        }
-
         if let keychainCredentials = try credentialLoader.loadKeychainCredentials() {
             return try await fetchUsageViaAPI(
                 startingWith: keychainCredentials,
                 credentialScope: .keychain
             )
+        }
+
+        // Last-resort fallback: scrape the CLI only when no token is available via file or Keychain.
+        if let claudePath = claudeBinaryLocator() {
+            return try fetchUsageViaCLI(binaryPath: claudePath)
         }
 
         throw UsageError.noCredentials("Claude Code: not logged in")
