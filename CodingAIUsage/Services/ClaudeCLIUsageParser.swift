@@ -167,7 +167,7 @@ struct ClaudeCLIUsageParser {
     private func parseHumanResetDate(from line: String) -> Date? {
         guard let clock = parseClockTime(in: line) else { return nil }
 
-        let timeZone = firstCaptureGroup(#"\(([A-Za-z]+/[A-Za-z_]+)\)"#, in: line)
+        let timeZone = firstCaptureGroup(#"\(([A-Za-z]+(?:[/_\-][A-Za-z_]+)+)\)"#, in: line)
             .flatMap { TimeZone(identifier: $0) } ?? .current
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone

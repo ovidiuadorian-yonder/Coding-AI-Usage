@@ -52,6 +52,9 @@ actor ClaudeUsageService: ClaudeUsageServing {
     }
 
     func fetchUsage() async throws -> ServiceUsage {
+        // File and Keychain are alternative credential sources, tried in priority order. A non-auth
+        // error (rate limit / network) from the chosen source propagates to the caller and is recovered
+        // by polling backoff; we intentionally do not fall back across sources on transient failures.
         if let fileCredentials = try credentialLoader.loadFileCredentials() {
             return try await fetchUsageViaAPI(
                 startingWith: fileCredentials,
@@ -107,7 +110,10 @@ actor ClaudeUsageService: ClaudeUsageServing {
         didReloadCredentials: Bool = false
     ) async throws -> ServiceUsage {
         var activeCredentials = credentials
-        if credentialLoader.needsRefresh(activeCredentials) {
+        // Only refresh proactively on the first attempt. After a 401 we reload the freshest
+        // stored credential (the `claude` CLI may have rotated it) and try it directly — refreshing
+        // again here would re-use our already-consumed refresh token and yield a false invalid_grant.
+        if !didReloadCredentials, credentialLoader.needsRefresh(activeCredentials) {
             activeCredentials = try await refreshCredentials(activeCredentials)
         }
 

@@ -207,6 +207,13 @@ final class ClaudeUsageTests: XCTestCase {
             "https://platform.claude.com/v1/oauth/token",
             "https://api.anthropic.com/api/oauth/usage"
         ])
+
+        let onDisk = try String(contentsOf: filePath, encoding: .utf8)
+        XCTAssertTrue(onDisk.contains("stale-token"), "refresh must not overwrite the credentials file")
+        // Use a JSON-key-aware check: the accessToken value must still be the original stale token.
+        // A plain contains("fresh-token") would be a false positive because "refreshToken":"refresh-token"
+        // contains "fresh-token" as a substring.
+        XCTAssertFalse(onDisk.contains("\"accessToken\":\"fresh-token\""), "refreshed token must stay in memory only")
     }
 
     func testClaudeUsageServiceReloadsCredentialsAfter401AndRetriesOnce() async throws {
@@ -503,6 +510,58 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertEqual(comps.hour, 9)
         XCTAssertEqual(comps.day, 12, "9am already passed at 10:00 now, so it must roll to tomorrow")
         XCTAssertGreaterThan(reset, fixedNow)
+    }
+
+    func testClaudeUsageServiceDoesNotDoubleRefreshAfter401() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-dblrefresh-\(UUID().uuidString)", isDirectory: true)
+        let filePath = tempDir.appendingPathComponent(".claude/.credentials.json")
+        try FileManager.default.createDirectory(at: filePath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try #"{"claudeAiOauth":{"accessToken":"stale","refreshToken":"rt","expiresAt":0}}"#
+            .write(to: filePath, atomically: true, encoding: .utf8)
+
+        let tokenCalls = CallCounter()
+        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: .empty)
+        let service = ClaudeUsageService(
+            credentialLoader: loader,
+            networkClient: { request in
+                if request.url?.absoluteString == "https://platform.claude.com/v1/oauth/token" {
+                    tokenCalls.value += 1
+                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                    return (Data(#"{"access_token":"fresh","expires_in":3600}"#.utf8), response)
+                }
+                // Usage endpoint always rejects -> exercises the 401 recovery path.
+                let response = HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!
+                return (Data(), response)
+            },
+            cliExecutor: { _, _ in XCTFail("CLI must not run"); return .init(exitCode: 1, output: "") },
+            claudeBinaryLocator: { nil }
+        )
+
+        do {
+            _ = try await service.fetchUsage()
+            XCTFail("expected fetchUsage to throw authExpired")
+        } catch let error as UsageError {
+            guard case .authExpired = error else {
+                XCTFail("expected .authExpired, got \(error)")
+                return
+            }
+        }
+
+        XCTAssertEqual(tokenCalls.value, 1, "refresh token must not be consumed twice across the 401 retry")
+    }
+
+    func testClaudeCLIUsageParserParsesMultiComponentTimezone() throws {
+        let fixedNow = Date(timeIntervalSince1970: 1_775_894_400) // 2026-04-11T08:00:00Z
+        let parser = ClaudeCLIUsageParser(now: { fixedNow })
+        let usage = try parser.parse("Current session: 100% used\nResets 9:40pm (America/Indiana/Indianapolis)")
+        let reset = try XCTUnwrap(usage.fiveHourWindow?.resetTime)
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Indiana/Indianapolis")!
+        let comps = calendar.dateComponents([.hour, .minute], from: reset)
+        XCTAssertEqual(comps.hour, 21)
+        XCTAssertEqual(comps.minute, 40)
     }
 
     func testClaudeUsageServiceDoesNotFallBackToCLIWhenKeychainAPIFails() async throws {
