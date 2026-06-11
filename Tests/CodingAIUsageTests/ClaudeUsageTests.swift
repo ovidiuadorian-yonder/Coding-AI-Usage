@@ -396,4 +396,37 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertEqual(usage.fiveHourWindow?.remainingPercent, 100)
         XCTAssertEqual(usage.weeklyWindow?.remainingPercent, 80)
     }
+
+    func testClaudeUsageServiceDoesNotFallBackToCLIWhenKeychainAPIFails() async throws {
+        let keychain = KeychainService(
+            currentUsername: { "tester" },
+            credentialReader: { _, _ in #"{"claudeAiOauth":{"accessToken":"kc-token","expiresAt":9999999999999}}"# },
+            hashedServiceNameFinder: { "Claude Code-credentials" }
+        )
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-kcfail-\(UUID().uuidString)", isDirectory: true)
+        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: keychain)
+        let service = ClaudeUsageService(
+            credentialLoader: loader,
+            networkClient: { request in
+                let response = HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil, headerFields: nil)!
+                return (Data(), response)
+            },
+            cliExecutor: { _, _ in
+                XCTFail("CLI must not run as a fallback when the Keychain/API path errors")
+                return .init(exitCode: 1, output: "")
+            },
+            claudeBinaryLocator: { "/stub/claude" }
+        )
+
+        do {
+            _ = try await service.fetchUsage()
+            XCTFail("expected fetchUsage to throw when the API is rate-limited")
+        } catch let error as UsageError {
+            guard case .rateLimited = error else {
+                XCTFail("expected .rateLimited, got \(error)")
+                return
+            }
+        }
+    }
 }
