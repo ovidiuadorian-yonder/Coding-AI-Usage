@@ -428,6 +428,47 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertEqual(writeCounter.value, 0, "refresh must not write the new token back to the Keychain")
     }
 
+    func testClaudeCLIUsageParserParsesHumanResetTimeSameDay() throws {
+        // Fixed "now" = 2026-04-11T08:00:00Z == 10:00 in Europe/Madrid (CEST, UTC+2).
+        let fixedNow = Date(timeIntervalSince1970: 1_775_894_400)
+        let parser = ClaudeCLIUsageParser(now: { fixedNow })
+        let output = """
+        Current session: 100% used
+        Resets 9:40pm (Europe/Madrid)
+
+        Current week (all models): 60% used
+        """
+
+        let usage = try parser.parse(output)
+        let reset = try XCTUnwrap(usage.fiveHourWindow?.resetTime)
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Madrid")!
+        let comps = calendar.dateComponents([.hour, .minute], from: reset)
+        XCTAssertEqual(comps.hour, 21)
+        XCTAssertEqual(comps.minute, 40)
+        XCTAssertGreaterThan(reset, fixedNow)
+    }
+
+    func testClaudeCLIUsageParserParsesHumanResetTimeWithFutureDate() throws {
+        let fixedNow = Date(timeIntervalSince1970: 1_775_894_400) // 2026-04-11
+        let parser = ClaudeCLIUsageParser(now: { fixedNow })
+        let output = """
+        Current session: 100% used
+        Resets Nov 13, 2pm (America/New_York)
+        """
+
+        let usage = try parser.parse(output)
+        let reset = try XCTUnwrap(usage.fiveHourWindow?.resetTime)
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/New_York")!
+        let comps = calendar.dateComponents([.month, .day, .hour], from: reset)
+        XCTAssertEqual(comps.month, 11)
+        XCTAssertEqual(comps.day, 13)
+        XCTAssertEqual(comps.hour, 14)
+    }
+
     func testClaudeUsageServiceDoesNotFallBackToCLIWhenKeychainAPIFails() async throws {
         let keychain = KeychainService(
             currentUsername: { "tester" },
