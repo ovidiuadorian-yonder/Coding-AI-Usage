@@ -31,6 +31,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
     private let refreshURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
     private let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     private let oauthScopes = "user:profile user:inference user:sessions:claude_code"
+    private let userAgent = "claude-code/2.1.173"
 
     init(
         credentialLoader: ClaudeCredentialLoader = ClaudeCredentialLoader(),
@@ -158,6 +159,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
         request.httpMethod = "POST"
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "grant_type": "refresh_token",
             "refresh_token": refreshToken,
@@ -215,6 +217,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
         let (data, response): (Data, URLResponse)
         do {

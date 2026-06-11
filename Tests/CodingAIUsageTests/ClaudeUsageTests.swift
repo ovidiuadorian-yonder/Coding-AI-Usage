@@ -9,6 +9,10 @@ private final class CallCounter: @unchecked Sendable {
     var value = 0
 }
 
+private final class HeaderRecorder: @unchecked Sendable {
+    var headers: [String: String] = [:]
+}
+
 final class ClaudeUsageTests: XCTestCase {
     @MainActor
     func testClaudeCheckInstalledFindsUserLocalBinaryWithoutPATH() async throws {
@@ -328,6 +332,33 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertNil(usage.fiveHourWindow)
         XCTAssertEqual(usage.weeklyWindow?.remainingPercent, 60)
         XCTAssertEqual(usage.windows.count, 1)
+    }
+
+    func testClaudeUsageRequestSendsClaudeCodeUserAgent() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-ua-\(UUID().uuidString)", isDirectory: true)
+        let filePath = tempDir.appendingPathComponent(".claude/.credentials.json")
+        try FileManager.default.createDirectory(at: filePath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try #"{"claudeAiOauth":{"accessToken":"tok","expiresAt":9999999999999}}"#
+            .write(to: filePath, atomically: true, encoding: .utf8)
+
+        let recorder = HeaderRecorder()
+        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: .empty)
+        let service = ClaudeUsageService(
+            credentialLoader: loader,
+            networkClient: { request in
+                recorder.headers = request.allHTTPHeaderFields ?? [:]
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                let data = Data(#"{"five_hour":{"utilization":20},"seven_day":{"utilization":40}}"#.utf8)
+                return (data, response)
+            },
+            cliExecutor: { _, _ in XCTFail("CLI must not run"); return .init(exitCode: 1, output: "") },
+            claudeBinaryLocator: { nil }
+        )
+
+        _ = try await service.fetchUsage()
+
+        XCTAssertEqual(recorder.headers["User-Agent"], "claude-code/2.1.173")
     }
 
     func testClaudeUsageResponseToleratesWindowWithNullUtilization() throws {
