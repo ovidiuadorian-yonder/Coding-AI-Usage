@@ -197,7 +197,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
             source: credentials.source,
             rawPayload: credentials.rawPayload
         )
-        try credentialLoader.persist(updatedCredentials)
+        credentialLoader.cacheRefreshedCredentials(updatedCredentials)
         return updatedCredentials
     }
 

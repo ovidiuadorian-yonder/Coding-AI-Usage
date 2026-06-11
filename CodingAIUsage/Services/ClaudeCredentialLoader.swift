@@ -162,6 +162,13 @@ final class ClaudeCredentialLoader {
         cache(updatedCredentials)
     }
 
+    /// Updates the in-memory credential cache without writing to the Keychain or a file.
+    /// Used after an in-flight OAuth refresh so subsequent polls reuse the fresh token
+    /// while leaving the stored credential for the `claude` CLI to own.
+    func cacheRefreshedCredentials(_ credentials: ClaudeCredentials) {
+        cache(credentials)
+    }
+
     private var credentialFilePaths: [String] {
         [
             (homeDirectory as NSString).appendingPathComponent(".claude/.credentials.json"),

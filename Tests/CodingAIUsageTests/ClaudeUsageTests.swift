@@ -397,6 +397,37 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertEqual(usage.weeklyWindow?.remainingPercent, 80)
     }
 
+    func testClaudeUsageServiceDoesNotWriteRefreshedTokenBackToKeychain() async throws {
+        let writeCounter = CallCounter()
+        let keychain = KeychainService(
+            currentUsername: { "tester" },
+            credentialWriter: { _, _, _ in writeCounter.value += 1 },
+            credentialReader: { _, _ in #"{"claudeAiOauth":{"accessToken":"stale","refreshToken":"r","expiresAt":0}}"# },
+            hashedServiceNameFinder: { "Claude Code-credentials" }
+        )
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-nowrite-\(UUID().uuidString)", isDirectory: true)
+        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: keychain)
+        let service = ClaudeUsageService(
+            credentialLoader: loader,
+            networkClient: { request in
+                if request.url?.absoluteString == "https://platform.claude.com/v1/oauth/token" {
+                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                    return (Data(#"{"access_token":"fresh","expires_in":3600}"#.utf8), response)
+                }
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (Data(#"{"five_hour":{"utilization":10},"seven_day":{"utilization":20}}"#.utf8), response)
+            },
+            cliExecutor: { _, _ in XCTFail("CLI must not run"); return .init(exitCode: 1, output: "") },
+            claudeBinaryLocator: { nil }
+        )
+
+        let usage = try await service.fetchUsage()
+
+        XCTAssertEqual(usage.fiveHourWindow?.remainingPercent, 90)
+        XCTAssertEqual(writeCounter.value, 0, "refresh must not write the new token back to the Keychain")
+    }
+
     func testClaudeUsageServiceDoesNotFallBackToCLIWhenKeychainAPIFails() async throws {
         let keychain = KeychainService(
             currentUsername: { "tester" },
