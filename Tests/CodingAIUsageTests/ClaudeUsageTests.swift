@@ -296,4 +296,47 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertTrue(script.contains(#"do script "echo \"quoted\"""#))
         XCTAssertTrue(script.contains("tell application \"Terminal\""))
     }
+
+    func testClaudeUsageResponseDecodesExpandedNullableWindows() throws {
+        let data = Data(#"""
+        {"five_hour":{"utilization":33.0,"resets_at":"2026-04-11T07:00:00.528743+00:00"},
+         "seven_day":{"utilization":13.0,"resets_at":"2026-04-17T00:59:59.951713+00:00"},
+         "seven_day_opus":null,
+         "seven_day_sonnet":{"utilization":1.0,"resets_at":"2026-04-16T03:00:00.951719+00:00"},
+         "seven_day_oauth_apps":{"utilization":5},
+         "extra_usage":{"is_enabled":false,"monthly_limit":null,"used_credits":null,"utilization":null}}
+        """#.utf8)
+
+        let response = try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
+        let usage = response.toServiceUsage()
+
+        XCTAssertEqual(usage.fiveHourWindow?.remainingPercent, 67)
+        XCTAssertEqual(usage.weeklyWindow?.remainingPercent, 87)
+        XCTAssertNotNil(usage.fiveHourWindow?.resetTime)
+        XCTAssertNotNil(usage.weeklyWindow?.resetTime)
+        XCTAssertEqual(usage.windows.count, 2, "Opus/Sonnet must not become menu-bar windows")
+        XCTAssertTrue(usage.footerLines.contains("Weekly (Sonnet): 99% remaining"))
+        XCTAssertFalse(usage.footerLines.contains { $0.contains("Opus") }, "null Opus window is omitted")
+    }
+
+    func testClaudeUsageResponseHandlesMissingFiveHourWindow() throws {
+        let data = Data(#"{"seven_day":{"utilization":40,"resets_at":"2026-04-08T18:00:00Z"}}"#.utf8)
+
+        let response = try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
+        let usage = response.toServiceUsage()
+
+        XCTAssertNil(usage.fiveHourWindow)
+        XCTAssertEqual(usage.weeklyWindow?.remainingPercent, 60)
+        XCTAssertEqual(usage.windows.count, 1)
+    }
+
+    func testClaudeUsageResponseToleratesWindowWithNullUtilization() throws {
+        let data = Data(#"{"five_hour":{"utilization":null},"seven_day":{"utilization":20}}"#.utf8)
+
+        let response = try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
+        let usage = response.toServiceUsage()
+
+        XCTAssertEqual(usage.fiveHourWindow?.remainingPercent, 100)
+        XCTAssertEqual(usage.weeklyWindow?.remainingPercent, 80)
+    }
 }
