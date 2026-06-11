@@ -481,6 +481,59 @@ final class UsageViewModelTests: XCTestCase {
         XCTAssertEqual(restored?.footerLines, ["Updated from cache"])
     }
 
+    func testMenuBarPlainTextShowsDashForMissingFiveHourWindowInsteadOfZero() {
+        let viewModel = UsageViewModel(
+            notificationService: NotificationService(
+                requestPermissionHandler: { completion in completion(true) },
+                configureAuthorizationHandler: { _ in }
+            ),
+            launchAtLoginController: TestLaunchAtLoginController(isEnabled: false),
+            autostart: false
+        )
+        viewModel.showClaude = true
+        viewModel.claudeUsage = ServiceUsage(
+            id: "claude",
+            displayName: "Claude Code",
+            shortLabel: "CC",
+            windows: [
+                UsageWindow(id: "seven_day", name: "Weekly", compactLabel: "w", utilization: 0.40, resetTime: nil)
+            ],
+            lastUpdated: Date(),
+            error: nil
+        )
+
+        let text = viewModel.menuBarPlainText
+
+        XCTAssertTrue(text.contains("5h% --"), "missing five_hour window must render as -- not 0; got: \(text)")
+        XCTAssertTrue(text.contains("w% 60"), "weekly remaining should show; got: \(text)")
+        XCTAssertFalse(text.contains("5h% 0"), "must not falsely show 0% for an unreported window; got: \(text)")
+    }
+
+    func testMenuBarPlainTextShowsBothClaudeWindowsWhenPresent() {
+        let viewModel = UsageViewModel(
+            notificationService: NotificationService(
+                requestPermissionHandler: { completion in completion(true) },
+                configureAuthorizationHandler: { _ in }
+            ),
+            launchAtLoginController: TestLaunchAtLoginController(isEnabled: false),
+            autostart: false
+        )
+        viewModel.showClaude = true
+        viewModel.claudeUsage = ServiceUsage(
+            id: "claude",
+            displayName: "Claude Code",
+            shortLabel: "CC",
+            windows: [
+                UsageWindow(id: "five_hour", name: "5-Hour", compactLabel: "5h", utilization: 0.20, resetTime: nil),
+                UsageWindow(id: "seven_day", name: "Weekly", compactLabel: "w", utilization: 0.50, resetTime: nil)
+            ],
+            lastUpdated: Date(),
+            error: nil
+        )
+
+        XCTAssertTrue(viewModel.menuBarPlainText.contains("CC 5h% 80 | w% 50"))
+    }
+
     private static func decodingError() -> DecodingError {
         DecodingError.dataCorrupted(
             .init(codingPath: [], debugDescription: "Malformed response")
