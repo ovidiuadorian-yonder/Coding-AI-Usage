@@ -257,14 +257,14 @@ The app is **not sandboxed** by design. It needs cross-app Keychain access and f
 # Debug build (faster, for development)
 swift build
 
-# Release build + app bundle only
+# Release build + sign + app bundle only
 ./build.sh
 
 # Release build + install to /Applications + launch
 ./deploy.sh
 ```
 
-Use `./build.sh` when you want the bundle only and prefer to handle install, copy, signing, or launch steps yourself.
+Use `./build.sh` when you want the signed bundle only, without installing or launching it. (Requires the one-time self-signed certificate described in the [Code Signing](#code-signing-one-time-build-from-source) section above.)
 
 ### Project Structure
 

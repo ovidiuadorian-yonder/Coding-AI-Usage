@@ -28,7 +28,7 @@ persists across rebuilds. Create a free self-signed identity once:
   4. Click Create, then keep it in the "login" keychain.
 
 Already have an Apple Developer ID? Re-run with:
-  SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build.sh
+  SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./deploy.sh
 EOF
     exit 1
 fi
