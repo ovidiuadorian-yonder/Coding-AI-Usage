@@ -228,18 +228,19 @@ struct ClaudeCLIUsageParser {
         let months = ["jan", "feb", "mar", "apr", "may", "jun",
                       "jul", "aug", "sep", "oct", "nov", "dec"]
         let pattern = #"([A-Za-z]{3})[a-z]*\s+([0-9]{1,2})"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(
-                in: line,
-                range: NSRange(line.startIndex..<line.endIndex, in: line)
-              ),
-              let monthRange = Range(match.range(at: 1), in: line),
-              let dayRange = Range(match.range(at: 2), in: line),
-              let monthIndex = months.firstIndex(of: line[monthRange].lowercased()),
-              let day = Int(line[dayRange]) else {
-            return nil
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+
+        let fullRange = NSRange(line.startIndex..<line.endIndex, in: line)
+        for match in regex.matches(in: line, range: fullRange) {
+            guard let monthRange = Range(match.range(at: 1), in: line),
+                  let dayRange = Range(match.range(at: 2), in: line),
+                  let monthIndex = months.firstIndex(of: line[monthRange].lowercased()),
+                  let day = Int(line[dayRange]) else {
+                continue
+            }
+            return (month: monthIndex + 1, day: day)
         }
-        return (month: monthIndex + 1, day: day)
+        return nil
     }
 
     private func firstCaptureGroup(_ pattern: String, in line: String) -> String? {

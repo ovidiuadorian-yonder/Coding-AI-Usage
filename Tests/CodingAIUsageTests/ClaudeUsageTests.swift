@@ -469,6 +469,42 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertEqual(comps.hour, 14)
     }
 
+    func testClaudeCLIUsageParserHandlesMidnightAndNoonMeridiem() throws {
+        let fixedNow = Date(timeIntervalSince1970: 1_775_894_400) // 10:00 Europe/Madrid
+        let parser = ClaudeCLIUsageParser(now: { fixedNow })
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Madrid")!
+
+        for (label, expectedHour) in [("12am", 0), ("12pm", 12), ("1pm", 13), ("11pm", 23)] {
+            let usage = try parser.parse("Current session: 100% used\nResets \(label) (Europe/Madrid)")
+            let reset = try XCTUnwrap(usage.fiveHourWindow?.resetTime, "for \(label)")
+            XCTAssertEqual(calendar.component(.hour, from: reset), expectedHour, "for \(label)")
+        }
+    }
+
+    func testClaudeCLIUsageParserReturnsNilResetForUnparseableTime() throws {
+        let fixedNow = Date(timeIntervalSince1970: 1_775_894_400)
+        let parser = ClaudeCLIUsageParser(now: { fixedNow })
+        // No am/pm, no ISO timestamp -> reset must be nil, but the window must still be built.
+        let usage = try parser.parse("Current session: 100% used\nResets in 3h")
+        XCTAssertNotNil(usage.fiveHourWindow)
+        XCTAssertNil(usage.fiveHourWindow?.resetTime)
+    }
+
+    func testClaudeCLIUsageParserRollsResetToNextDayWhenTimeAlreadyPassed() throws {
+        let fixedNow = Date(timeIntervalSince1970: 1_775_894_400) // 10:00 Europe/Madrid, Apr 11
+        let parser = ClaudeCLIUsageParser(now: { fixedNow })
+        let usage = try parser.parse("Current session: 100% used\nResets 9am (Europe/Madrid)")
+        let reset = try XCTUnwrap(usage.fiveHourWindow?.resetTime)
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Madrid")!
+        let comps = calendar.dateComponents([.day, .hour], from: reset)
+        XCTAssertEqual(comps.hour, 9)
+        XCTAssertEqual(comps.day, 12, "9am already passed at 10:00 now, so it must roll to tomorrow")
+        XCTAssertGreaterThan(reset, fixedNow)
+    }
+
     func testClaudeUsageServiceDoesNotFallBackToCLIWhenKeychainAPIFails() async throws {
         let keychain = KeychainService(
             currentUsername: { "tester" },
