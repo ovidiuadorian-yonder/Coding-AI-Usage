@@ -29,6 +29,9 @@ cp CodingAIUsage/Info.plist "${CONTENTS}/Info.plist"
 # Copy app icon
 cp Assets/Icon/AppIcon.icns "${RESOURCES}/AppIcon.icns"
 
+# Sign with a stable identity so the Keychain "Always Allow" grant survives rebuilds.
+"${SCRIPT_DIR}/sign.sh"
+
 echo ""
 echo "Build complete: ${APP_BUNDLE}"
 echo ""
