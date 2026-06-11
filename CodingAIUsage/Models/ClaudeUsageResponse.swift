@@ -17,9 +17,9 @@ struct ClaudeUsageResponse: Decodable {
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
-            // Tolerate a present-but-null or missing utilization (e.g. an empty window object).
-            utilization = (try? container.decodeIfPresent(Double.self, forKey: .utilization)) ?? 0
-            resetsAt = (try? container.decodeIfPresent(String.self, forKey: .resetsAt)) ?? nil
+            // null or a missing key => default; a wrong-typed value still throws (don't mask corruption).
+            utilization = try container.decodeIfPresent(Double.self, forKey: .utilization) ?? 0
+            resetsAt = try container.decodeIfPresent(String.self, forKey: .resetsAt)
         }
     }
 
@@ -80,7 +80,7 @@ struct ClaudeUsageResponse: Decodable {
     }
 
     private func remainingPercent(_ window: WindowData) -> Int {
-        max(0, Int((100.0 - window.utilization).rounded()))
+        max(0, Int(100.0 - window.utilization))
     }
 
     private func parseResetDate(_ rawValue: String?, using formatter: ISO8601DateFormatter) -> Date? {
