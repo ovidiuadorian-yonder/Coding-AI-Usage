@@ -26,7 +26,6 @@ final class ClaudeCredentialLoader {
     private let now: () -> Date
     private let cacheTTL: TimeInterval
     private let readFile: (String) -> Data?
-    private let writeFile: (String, Data) throws -> Void
     private let onInvalidate: () -> Void
     private let lock = NSLock()
     private var cachedCredentials: ClaudeCredentials?
@@ -38,14 +37,6 @@ final class ClaudeCredentialLoader {
         now: @escaping () -> Date = Date.init,
         cacheTTL: TimeInterval = 300,
         readFile: @escaping (String) -> Data? = { FileManager.default.contents(atPath: $0) },
-        writeFile: @escaping (String, Data) throws -> Void = { path, data in
-            let url = URL(fileURLWithPath: path)
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try data.write(to: url, options: .atomic)
-        },
         onInvalidate: @escaping () -> Void = {}
     ) {
         self.homeDirectory = homeDirectory
@@ -53,7 +44,6 @@ final class ClaudeCredentialLoader {
         self.now = now
         self.cacheTTL = cacheTTL
         self.readFile = readFile
-        self.writeFile = writeFile
         self.onInvalidate = onInvalidate
     }
 
@@ -140,26 +130,6 @@ final class ClaudeCredentialLoader {
         }
 
         return now().addingTimeInterval(300) >= expiresAt
-    }
-
-    func persist(_ credentials: ClaudeCredentials) throws {
-        let updatedPayload = try updatedPayloadJSON(for: credentials)
-        let updatedCredentials = ClaudeCredentials(
-            accessToken: credentials.accessToken,
-            refreshToken: credentials.refreshToken,
-            expiresAt: credentials.expiresAt,
-            source: credentials.source,
-            rawPayload: updatedPayload
-        )
-
-        switch credentials.source {
-        case .file(let path):
-            try writeFile(path, Data(updatedPayload.utf8))
-        case .keychain(let serviceName):
-            try keychainService.writeClaudeCredentialsJSON(updatedPayload, serviceName: serviceName)
-        }
-
-        cache(updatedCredentials)
     }
 
     /// Updates the in-memory credential cache without writing to the Keychain or a file.
@@ -251,19 +221,4 @@ final class ClaudeCredentialLoader {
         return nil
     }
 
-    private func updatedPayloadJSON(for credentials: ClaudeCredentials) throws -> String {
-        guard let data = credentials.rawPayload.data(using: .utf8),
-              var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw UsageError.networkError("Claude Code: unable to persist refreshed credentials")
-        }
-
-        var oauth = (json["claudeAiOauth"] as? [String: Any]) ?? [:]
-        oauth["accessToken"] = credentials.accessToken
-        oauth["refreshToken"] = credentials.refreshToken
-        oauth["expiresAt"] = credentials.expiresAt.map { $0.timeIntervalSince1970 * 1000 }
-        json["claudeAiOauth"] = oauth
-
-        let updatedData = try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
-        return String(decoding: updatedData, as: UTF8.self)
-    }
 }
