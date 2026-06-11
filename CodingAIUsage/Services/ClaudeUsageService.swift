@@ -31,6 +31,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
     private let refreshURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
     private let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     private let oauthScopes = "user:profile user:inference user:sessions:claude_code"
+    private let userAgent = "claude-code/2.1.173"
 
     init(
         credentialLoader: ClaudeCredentialLoader = ClaudeCredentialLoader(),
@@ -51,6 +52,9 @@ actor ClaudeUsageService: ClaudeUsageServing {
     }
 
     func fetchUsage() async throws -> ServiceUsage {
+        // File and Keychain are alternative credential sources, tried in priority order. A non-auth
+        // error (rate limit / network) from the chosen source propagates to the caller and is recovered
+        // by polling backoff; we intentionally do not fall back across sources on transient failures.
         if let fileCredentials = try credentialLoader.loadFileCredentials() {
             return try await fetchUsageViaAPI(
                 startingWith: fileCredentials,
@@ -58,25 +62,16 @@ actor ClaudeUsageService: ClaudeUsageServing {
             )
         }
 
-        if let claudePath = claudeBinaryLocator() {
-            do {
-                return try fetchUsageViaCLI(binaryPath: claudePath)
-            } catch let cliError as UsageError {
-                if let keychainCredentials = try credentialLoader.loadKeychainCredentials() {
-                    return try await fetchUsageViaAPI(
-                        startingWith: keychainCredentials,
-                        credentialScope: .keychain
-                    )
-                }
-                throw cliError
-            }
-        }
-
         if let keychainCredentials = try credentialLoader.loadKeychainCredentials() {
             return try await fetchUsageViaAPI(
                 startingWith: keychainCredentials,
                 credentialScope: .keychain
             )
+        }
+
+        // Last-resort fallback: scrape the CLI only when no token is available via file or Keychain.
+        if let claudePath = claudeBinaryLocator() {
+            return try fetchUsageViaCLI(binaryPath: claudePath)
         }
 
         throw UsageError.noCredentials("Claude Code: not logged in")
@@ -115,7 +110,10 @@ actor ClaudeUsageService: ClaudeUsageServing {
         didReloadCredentials: Bool = false
     ) async throws -> ServiceUsage {
         var activeCredentials = credentials
-        if credentialLoader.needsRefresh(activeCredentials) {
+        // Only refresh proactively on the first attempt. After a 401 we reload the freshest
+        // stored credential (the `claude` CLI may have rotated it) and try it directly — refreshing
+        // again here would re-use our already-consumed refresh token and yield a false invalid_grant.
+        if !didReloadCredentials, credentialLoader.needsRefresh(activeCredentials) {
             activeCredentials = try await refreshCredentials(activeCredentials)
         }
 
@@ -158,6 +156,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
         request.httpMethod = "POST"
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "grant_type": "refresh_token",
             "refresh_token": refreshToken,
@@ -204,7 +203,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
             source: credentials.source,
             rawPayload: credentials.rawPayload
         )
-        try credentialLoader.persist(updatedCredentials)
+        credentialLoader.cacheRefreshedCredentials(updatedCredentials)
         return updatedCredentials
     }
 
@@ -215,6 +214,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
         let (data, response): (Data, URLResponse)
         do {

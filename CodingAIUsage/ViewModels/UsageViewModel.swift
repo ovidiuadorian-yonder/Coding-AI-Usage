@@ -194,9 +194,9 @@ final class UsageViewModel: ObservableObject {
     var menuBarPlainText: String {
         var parts: [String] = []
 
-        if showClaude, let claude = claudeUsage, claude.error == nil {
-            let fh = claude.fiveHourWindow?.remainingPercent ?? 0
-            let w = claude.weeklyWindow?.remainingPercent ?? 0
+        if showClaude, let claude = claudeUsage, claude.error == nil, !claude.windows.isEmpty {
+            let fh = claude.fiveHourWindow.map { "\($0.remainingPercent)" } ?? "--"
+            let w = claude.weeklyWindow.map { "\($0.remainingPercent)" } ?? "--"
             parts.append("CC 5h% \(fh) | w% \(w)")
         }
 

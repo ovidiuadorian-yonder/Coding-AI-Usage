@@ -1,6 +1,12 @@
 import Foundation
 
 struct ClaudeCLIUsageParser {
+    private let now: () -> Date
+
+    init(now: @escaping () -> Date = Date.init) {
+        self.now = now
+    }
+
     func parse(_ output: String) throws -> ServiceUsage {
         let clean = normalized(output)
         if let error = detectError(in: clean) {
@@ -128,6 +134,13 @@ struct ClaudeCLIUsageParser {
     }
 
     private func parseResetDate(from line: String) -> Date? {
+        if let isoDate = parseISOResetDate(from: line) {
+            return isoDate
+        }
+        return parseHumanResetDate(from: line)
+    }
+
+    private func parseISOResetDate(from line: String) -> Date? {
         let pattern = #"(20[0-9]{2}-[0-9]{2}-[0-9]{2}T[^ ]+)"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(
@@ -147,5 +160,98 @@ struct ClaudeCLIUsageParser {
 
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: dateString)
+    }
+
+    // Parses "Resets 9:40pm (Europe/Madrid)" or "Resets Nov 13, 2pm (America/New_York)".
+    // No date token => the next occurrence of that local time (today if still future, else tomorrow).
+    private func parseHumanResetDate(from line: String) -> Date? {
+        guard let clock = parseClockTime(in: line) else { return nil }
+
+        let timeZone = firstCaptureGroup(#"\(([A-Za-z]+(?:[/_\-][A-Za-z_]+)+)\)"#, in: line)
+            .flatMap { TimeZone(identifier: $0) } ?? .current
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+
+        let nowDate = now()
+        var components = calendar.dateComponents([.year, .month, .day], from: nowDate)
+        components.hour = clock.hour
+        components.minute = clock.minute
+        components.second = 0
+
+        let monthDay = parseMonthDay(in: line)
+        if let monthDay {
+            components.month = monthDay.month
+            components.day = monthDay.day
+        }
+
+        guard var candidate = calendar.date(from: components) else { return nil }
+
+        if monthDay == nil {
+            if candidate <= nowDate {
+                candidate = calendar.date(byAdding: .day, value: 1, to: candidate) ?? candidate
+            }
+        } else if candidate < nowDate {
+            // A dated reset already past this year resolves to next year.
+            components.year = (components.year ?? 0) + 1
+            candidate = calendar.date(from: components) ?? candidate
+        }
+
+        return candidate
+    }
+
+    private func parseClockTime(in line: String) -> (hour: Int, minute: Int)? {
+        let pattern = #"([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(
+                in: line,
+                range: NSRange(line.startIndex..<line.endIndex, in: line)
+              ),
+              let hourRange = Range(match.range(at: 1), in: line),
+              var hour = Int(line[hourRange]),
+              let meridiemRange = Range(match.range(at: 3), in: line) else {
+            return nil
+        }
+
+        var minute = 0
+        if let minuteRange = Range(match.range(at: 2), in: line), let parsed = Int(line[minuteRange]) {
+            minute = parsed
+        }
+
+        let meridiem = line[meridiemRange].lowercased()
+        if meridiem == "pm" && hour != 12 { hour += 12 }
+        if meridiem == "am" && hour == 12 { hour = 0 }
+
+        return (hour, minute)
+    }
+
+    private func parseMonthDay(in line: String) -> (month: Int, day: Int)? {
+        let months = ["jan", "feb", "mar", "apr", "may", "jun",
+                      "jul", "aug", "sep", "oct", "nov", "dec"]
+        let pattern = #"([A-Za-z]{3})[a-z]*\s+([0-9]{1,2})"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+
+        let fullRange = NSRange(line.startIndex..<line.endIndex, in: line)
+        for match in regex.matches(in: line, range: fullRange) {
+            guard let monthRange = Range(match.range(at: 1), in: line),
+                  let dayRange = Range(match.range(at: 2), in: line),
+                  let monthIndex = months.firstIndex(of: line[monthRange].lowercased()),
+                  let day = Int(line[dayRange]) else {
+                continue
+            }
+            return (month: monthIndex + 1, day: day)
+        }
+        return nil
+    }
+
+    private func firstCaptureGroup(_ pattern: String, in line: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(
+                in: line,
+                range: NSRange(line.startIndex..<line.endIndex, in: line)
+              ),
+              let range = Range(match.range(at: 1), in: line) else {
+            return nil
+        }
+        return String(line[range])
     }
 }

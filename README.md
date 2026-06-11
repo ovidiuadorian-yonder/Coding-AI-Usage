@@ -47,6 +47,7 @@ Before installing, make sure you have:
 |---|---|---|
 | **macOS 14.0+** (Sonoma or later) | Apple menu > About This Mac | Update via System Settings |
 | **Xcode Command Line Tools** | `xcode-select -p` | `xcode-select --install` |
+| **Self-signed code-signing cert** (build-from-source only) | `security find-identity -v -p codesigning \| grep "Coding AI Usage Self-Signed"` | See "Code Signing" below |
 | **Claude Code CLI** | `which claude` | [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) |
 | **OpenAI Codex CLI** | `which codex` | [Install Codex](https://github.com/openai/codex) |
 | **Windsurf** | `ls /Applications/Windsurf.app` | [Install Windsurf](https://windsurf.com/) |
@@ -61,6 +62,31 @@ codex login
 ```
 
 For Windsurf, open the app and sign in normally. The app reads Windsurf's local state first, including cached quota data from `state.vscdb`, and only falls back to an experimental session-backed scrape when exact daily or weekly quotas are not present locally.
+
+---
+
+## Code Signing (one-time, build-from-source)
+
+The app reads your Claude Code OAuth token from the macOS Keychain. macOS ties a
+"Always Allow" Keychain grant to the app's code-signing identity, so an **unsigned/ad-hoc**
+build is treated as a new app on every rebuild and re-prompts you each time. `build.sh` signs
+the bundle with a **stable self-signed identity** so the grant persists.
+
+Create the identity once (free, no Apple Developer account):
+
+1. Open **Keychain Access.app**
+2. Menu: **Keychain Access > Certificate Assistant > Create a Certificate…**
+3. Name: `Coding AI Usage Self-Signed` · Identity Type: **Self Signed Root** · Certificate Type: **Code Signing**
+4. Click **Create** and keep it in the **login** keychain.
+
+If you have an Apple Developer ID, use it instead:
+
+```bash
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./deploy.sh
+```
+
+The first refresh after switching identities prompts once for Keychain access — click
+**"Always Allow"** and it will stick across all future rebuilds.
 
 ---
 
@@ -145,6 +171,7 @@ Click the menu bar text to open the detail panel:
 
 - **Progress bars** for each time window with color coding
 - **Reset timers** showing when each window resets
+- **Weekly Opus / Sonnet** sub-limits shown as footer lines under Claude Code when your plan reports them
 - **Refresh** - manually trigger an update, unlock protected-resource reads for this app session, and reset any rate limit backoff
 - **Settings** - configure services, polling, alerts, and launch at login
 - **About** - app info and credits
@@ -172,6 +199,8 @@ The app reads locally stored credentials and usage state:
 | **Windsurf** | `~/Library/Application Support/Windsurf/User/globalStorage/state.vscdb` | Local cached user-status protobuf in `windsurfAuthStatus` / `codeium.windsurf`, with experimental session-backed scrape of `windsurf.com/subscription/usage` only as a fallback |
 
 - **No passwords or API keys are stored by the app** - it reads existing credentials that the CLI tools have already saved
+- **The app never writes to the Keychain** - if the Claude OAuth token needs refreshing, the app refreshes it in memory for that request only and lets the `claude` CLI own the stored token
+- **Claude usage comes from the JSON API** (`api.anthropic.com/api/oauth/usage`) sent with a `claude-code` User-Agent; the `claude /usage` CLI screen is only scraped as a last-resort fallback when no token is available
 - **Protected resources are deferred until manual refresh** - launch and background polling do not read Keychain or service files before the first user-initiated refresh
 - **Last known usage is cached locally** - successful refreshes are persisted and restored on relaunch so the dropdown is not empty between sessions
 - **Windsurf exact daily/weekly quotas are required** - billing-cycle-only cache data is not shown in the compact menu bar
@@ -228,14 +257,14 @@ The app is **not sandboxed** by design. It needs cross-app Keychain access and f
 # Debug build (faster, for development)
 swift build
 
-# Release build + app bundle only
+# Release build + sign + app bundle only
 ./build.sh
 
 # Release build + install to /Applications + launch
 ./deploy.sh
 ```
 
-Use `./build.sh` when you want the bundle only and prefer to handle install, copy, signing, or launch steps yourself.
+Use `./build.sh` when you want the signed bundle only, without installing or launching it. (Requires the one-time self-signed certificate described in the [Code Signing](#code-signing-one-time-build-from-source) section above.)
 
 ### Project Structure
 

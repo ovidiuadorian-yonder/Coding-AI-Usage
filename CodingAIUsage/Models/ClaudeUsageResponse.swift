@@ -1,10 +1,12 @@
 import Foundation
 
-struct ClaudeUsageResponse: Codable {
-    let fiveHour: WindowData
-    let sevenDay: WindowData
+struct ClaudeUsageResponse: Decodable {
+    let fiveHour: WindowData?
+    let sevenDay: WindowData?
+    let sevenDayOpus: WindowData?
+    let sevenDaySonnet: WindowData?
 
-    struct WindowData: Codable {
+    struct WindowData: Decodable {
         let utilization: Double    // 0-100 percentage USED
         let resetsAt: String?
 
@@ -12,44 +14,73 @@ struct ClaudeUsageResponse: Codable {
             case utilization
             case resetsAt = "resets_at"
         }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            // null or a missing key => default; a wrong-typed value still throws (don't mask corruption).
+            utilization = try container.decodeIfPresent(Double.self, forKey: .utilization) ?? 0
+            resetsAt = try container.decodeIfPresent(String.self, forKey: .resetsAt)
+        }
     }
 
     enum CodingKeys: String, CodingKey {
         case fiveHour = "five_hour"
         case sevenDay = "seven_day"
+        case sevenDayOpus = "seven_day_opus"
+        case sevenDaySonnet = "seven_day_sonnet"
     }
 
     func toServiceUsage() -> ServiceUsage {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
-        let fiveHourReset = parseResetDate(fiveHour.resetsAt, using: formatter)
-        let sevenDayReset = parseResetDate(sevenDay.resetsAt, using: formatter)
-
-        return ServiceUsage(
-            id: "claude",
-            displayName: "Claude Code",
-            shortLabel: "CC",
-            windows: [
+        var windows: [UsageWindow] = []
+        if let fiveHour {
+            windows.append(
                 UsageWindow(
                     id: "five_hour",
                     name: "5-Hour",
                     compactLabel: "5h",
                     utilization: fiveHour.utilization / 100.0,
-                    resetTime: fiveHourReset
-                ),
+                    resetTime: parseResetDate(fiveHour.resetsAt, using: formatter)
+                )
+            )
+        }
+        if let sevenDay {
+            windows.append(
                 UsageWindow(
                     id: "seven_day",
                     name: "Weekly",
                     compactLabel: "w",
                     utilization: sevenDay.utilization / 100.0,
-                    resetTime: sevenDayReset
+                    resetTime: parseResetDate(sevenDay.resetsAt, using: formatter)
                 )
-            ],
+            )
+        }
+
+        // Opus/Sonnet weekly windows are shown as footer text only, so they never affect the
+        // compact menu-bar (primary/secondary windows) or the badge color (worstLevel).
+        var footerLines: [String] = []
+        if let sevenDayOpus {
+            footerLines.append("Weekly (Opus): \(remainingPercent(sevenDayOpus))% remaining")
+        }
+        if let sevenDaySonnet {
+            footerLines.append("Weekly (Sonnet): \(remainingPercent(sevenDaySonnet))% remaining")
+        }
+
+        return ServiceUsage(
+            id: "claude",
+            displayName: "Claude Code",
+            shortLabel: "CC",
+            windows: windows,
             lastUpdated: Date(),
             error: nil,
-            footerLines: []
+            footerLines: footerLines
         )
+    }
+
+    private func remainingPercent(_ window: WindowData) -> Int {
+        max(0, Int(100.0 - window.utilization))
     }
 
     private func parseResetDate(_ rawValue: String?, using formatter: ISO8601DateFormatter) -> Date? {
