@@ -4,14 +4,6 @@ struct SettingsView: View {
     @ObservedObject var viewModel: UsageViewModel
     let onDone: () -> Void
 
-    private let pollingOptions: [(String, Double)] = [
-        ("3 minutes", 180),
-        ("5 minutes", 300),
-        ("10 minutes", 600),
-        ("30 minutes", 1800),
-        ("1 hour", 3600)
-    ]
-
     private var notificationsBinding: Binding<Bool> {
         Binding(
             get: { viewModel.notificationsEnabled },
@@ -45,18 +37,13 @@ struct SettingsView: View {
                 .padding(.vertical, 4)
             }
 
-            // Polling
-            GroupBox("Polling Interval") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Picker("Refresh every:", selection: $viewModel.pollingIntervalSeconds) {
-                        ForEach(pollingOptions, id: \.1) { option in
-                            Text(option.0).tag(option.1)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .onChange(of: viewModel.pollingIntervalSeconds) { _, newValue in
-                        viewModel.updatePollingInterval(newValue)
-                    }
+            // Refresh behavior
+            GroupBox("Refresh") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Usage is fetched only when you open this menu (at most once a minute) or click Refresh. There is no background polling.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.vertical, 4)
             }

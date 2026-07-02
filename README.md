@@ -30,10 +30,10 @@ CC 5h% 50 | w% 63  CX 5h% 99 | w% 89  W d% 99 | w% 81
 - **Windsurf footer metadata** for plan end date and extra usage balance
 - **Local-first Windsurf parsing** from cached app state, with a scrape fallback only when exact quotas are missing
 - **Smart alerts** via macOS notifications when usage drops below a configurable threshold (default: 10%)
-- **Configurable polling** intervals: 3 min, 5 min (default), 10 min, 30 min, 1 hour
+- **On-demand refresh only** - usage is fetched when you open the menu (throttled to once a minute) or click Refresh; there is no background polling
 - **Manual refresh** button for on-demand updates
 - **Cached last-known usage** restored on relaunch before the first refresh
-- **Automatic rate limit handling** with exponential backoff
+- **Rate limit aware** - menu-open refreshes pause until a reported `Retry-After` expires
 - **Launch at Login** support
 - **Error reporting** in red text when services are unavailable
 
@@ -148,7 +148,7 @@ On the first launch, macOS will prompt you for permissions:
 
 ### Menu Bar
 
-The status bar text updates automatically based on your polling interval:
+The status bar text updates whenever a refresh runs (opening the dropdown or clicking Refresh):
 
 | Display | Meaning |
 |---|---|
@@ -167,13 +167,13 @@ The status bar text updates automatically based on your polling interval:
 
 ### Dropdown Panel
 
-Click the menu bar text to open the detail panel:
+Click the menu bar text to open the detail panel. Opening the panel triggers a refresh (at most once a minute, and never while a provider rate limit is active):
 
 - **Progress bars** for each time window with color coding
 - **Reset timers** showing when each window resets
 - **Weekly Opus / Sonnet** sub-limits shown as footer lines under Claude Code when your plan reports them
-- **Refresh** - manually trigger an update, unlock protected-resource reads for this app session, and reset any rate limit backoff
-- **Settings** - configure services, polling, alerts, and launch at login
+- **Refresh** - manually trigger an update, unlock protected-resource reads for this app session, and bypass the menu-open throttle
+- **Settings** - configure services, alerts, and launch at login
 - **About** - app info and credits
 - **Exit** - quit the app
 
@@ -182,7 +182,6 @@ Click the menu bar text to open the detail panel:
 | Setting | Options | Default |
 |---|---|---|
 | **Services** | Toggle Claude Code / Codex / Windsurf on or off | All enabled |
-| **Polling Interval** | 3 min, 5 min, 10 min, 30 min, 1 hour | 5 minutes |
 | **Alert Threshold** | 5% to 30% | 10% |
 | **Launch at Login** | On / Off | Off |
 
@@ -201,12 +200,12 @@ The app reads locally stored credentials and usage state:
 - **No passwords or API keys are stored by the app** - it reads existing credentials that the CLI tools have already saved
 - **The app never writes to the Keychain** - if the Claude OAuth token needs refreshing, the app refreshes it in memory for that request only and lets the `claude` CLI own the stored token
 - **Claude usage comes from the JSON API** (`api.anthropic.com/api/oauth/usage`) sent with a `claude-code` User-Agent; the `claude /usage` CLI screen is only scraped as a last-resort fallback when no token is available
-- **Protected resources are deferred until manual refresh** - launch and background polling do not read Keychain or service files before the first user-initiated refresh
+- **Protected resources are deferred until you interact with the app** - launch does not read Keychain or service files; the first read happens when you open the menu or click Refresh
 - **Last known usage is cached locally** - successful refreshes are persisted and restored on relaunch so the dropdown is not empty between sessions
 - **Windsurf exact daily/weekly quotas are required** - billing-cycle-only cache data is not shown in the compact menu bar
 - **Windsurf local source order** - cached user-status protobuf first, cached JSON snapshot second, experimental authenticated scrape last
-- Polling happens on a timer with automatic **exponential backoff** when rate-limited (capped at 30 minutes) after protected access has been unlocked for the session
-- Clicking **Refresh** resets any backoff and retries immediately
+- **No background polling** - refreshes run only when you open the menu (throttled to once a minute) or click Refresh
+- When a provider reports a rate limit, menu-open refreshes pause until the reported `Retry-After` expires (5 minutes if none is given); clicking **Refresh** retries immediately
 
 ---
 
@@ -215,10 +214,10 @@ The app reads locally stored credentials and usage state:
 | Permission | Why | When Prompted |
 |---|---|---|
 | **Keychain Access** | Read Claude Code OAuth token | First refresh |
-| **Network** | HTTPS to `api.anthropic.com`, `chatgpt.com`, and `windsurf.com` | First refresh and later polling |
+| **Network** | HTTPS to `api.anthropic.com`, `chatgpt.com`, and `windsurf.com` | First refresh and later manual/menu-open refreshes |
 | **Notifications** | Low-usage alerts | First launch |
-| **File System** (`~/.codex/`) | Read Codex auth token | First refresh and later polling |
-| **File System** (`~/Library/Application Support/Windsurf/`) | Read Windsurf state DB and fallback cookies | First refresh and later polling |
+| **File System** (`~/.codex/`) | Read Codex auth token | First refresh and later manual/menu-open refreshes |
+| **File System** (`~/Library/Application Support/Windsurf/`) | Read Windsurf state DB and fallback cookies | First refresh and later manual/menu-open refreshes |
 
 The app is **not sandboxed** by design. It needs cross-app Keychain access and filesystem access to `~/.codex/` that macOS sandboxing would block. This is the same approach used by other developer tools like CodexBar and Claude-Usage-Tracker.
 
@@ -283,8 +282,7 @@ CodingAIUsage/
 │   ├── CodexUsageService.swift     # Codex API client
 │   ├── UsageCacheStore.swift       # Persist last-known service snapshots between launches
 │   ├── WindsurfUsageService.swift  # Windsurf local state reader + fallback usage scraper
-│   ├── NotificationService.swift   # Alert notifications
-│   └── PollingScheduler.swift      # Timer with exponential backoff
+│   └── NotificationService.swift   # Alert notifications
 ├── ViewModels/
 │   └── UsageViewModel.swift        # Central state management
 └── Views/

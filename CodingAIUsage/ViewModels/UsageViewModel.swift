@@ -20,7 +20,6 @@ final class UsageViewModel: ObservableObject {
     @AppStorage("showCodex") var showCodex = true
     @AppStorage("showWindsurf") var showWindsurf = true
     @AppStorage("notificationsEnabled") var notificationsEnabled = false
-    @AppStorage("pollingIntervalSeconds") var pollingIntervalSeconds: Double = 300
     @AppStorage("alertThreshold") var alertThreshold: Double = 0.10
     @AppStorage("launchAtLogin") var launchAtLogin = false
 
@@ -31,8 +30,16 @@ final class UsageViewModel: ObservableObject {
     private let claudeAuthLauncher: ClaudeAuthLauncher
     private let launchAtLoginController: LaunchAtLoginControlling
     private let cacheStore: any UsageCacheStoring
-    let scheduler: PollingScheduler
     private var hasUnlockedProtectedAccess = false
+
+    // Refreshes happen only on user action: opening the menu bar window or
+    // clicking Refresh. Menu-open refreshes are throttled so re-opening the
+    // menu repeatedly does not hammer the APIs, and are paused entirely while
+    // a provider reports a rate limit.
+    private(set) var lastRefreshCompleted: Date?
+    private(set) var rateLimitedUntil: Date?
+    nonisolated static let menuOpenRefreshThrottle: TimeInterval = 60
+    nonisolated static let defaultRateLimitPause: TimeInterval = 300
 
     // Status checks (re-checked every 10 min, on wake, on manual refresh, and on auth errors)
     @Published var claudeInstalled = false
@@ -44,7 +51,6 @@ final class UsageViewModel: ObservableObject {
     private var lastPrerequisitesCheck: Date?
     private let prerequisitesCheckInterval: TimeInterval = 600 // Re-check every 10 min
     private var wakeObserver: NSObjectProtocol?
-    nonisolated private static let maxAutomaticRetryInterval: TimeInterval = 1800
 
     init(
         claudeService: (any ClaudeUsageServing)? = nil,
@@ -54,7 +60,6 @@ final class UsageViewModel: ObservableObject {
         claudeAuthLauncher: ClaudeAuthLauncher = ClaudeAuthLauncher(),
         launchAtLoginController: LaunchAtLoginControlling = SystemLaunchAtLoginController(),
         cacheStore: (any UsageCacheStoring)? = nil,
-        scheduler: PollingScheduler? = nil,
         autostart: Bool = true
     ) {
         self.claudeService = claudeService ?? ClaudeUsageService()
@@ -64,7 +69,6 @@ final class UsageViewModel: ObservableObject {
         self.claudeAuthLauncher = claudeAuthLauncher
         self.launchAtLoginController = launchAtLoginController
         self.cacheStore = cacheStore ?? UserDefaultsUsageCacheStore()
-        self.scheduler = scheduler ?? PollingScheduler()
         syncLaunchAtLoginState()
         restoreCachedUsage()
 
@@ -73,9 +77,8 @@ final class UsageViewModel: ObservableObject {
         if notificationsEnabled {
             self.notificationService.requestPermission()
         }
-        Task { @MainActor in
-            startPolling()
-        }
+        // On wake, only invalidate stale local state — never fetch. The next
+        // fetch happens when the user opens the menu or clicks Refresh.
         wakeObserver = NotificationCenter.default.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
@@ -84,10 +87,7 @@ final class UsageViewModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 await self.claudeService.invalidateCredentialCache()
-                self.scheduler.resetBackoff()
                 self.lastPrerequisitesCheck = nil
-                let nextInterval = await self.refresh()
-                self.scheduler.reschedule(after: nextInterval)
             }
         }
     }
@@ -98,22 +98,10 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
-    func startPolling() {
-        scheduler.updateBaseInterval(pollingIntervalSeconds)
-        scheduler.start { [weak self] in
-            guard let self else { return nil }
-            return await self.refresh()
-        }
-    }
-
-    func stopPolling() {
-        scheduler.stop()
-    }
-
     func refresh(
         forceLiveWindsurf: Bool = true,
         userInitiated: Bool = false
-    ) async -> TimeInterval {
+    ) async {
         isRefreshing = true
         errors.removeAll()
 
@@ -123,7 +111,7 @@ final class UsageViewModel: ObservableObject {
 
         guard hasUnlockedProtectedAccess else {
             isRefreshing = false
-            return pollingIntervalSeconds
+            return
         }
 
         let needsPrereqCheck = lastPrerequisitesCheck == nil ||
@@ -138,8 +126,9 @@ final class UsageViewModel: ObservableObject {
         async let windsurfResult: RefreshResult = fetchWindsurf(preferLiveRefresh: forceLiveWindsurf)
         let results = await [claudeResult, codexResult, windsurfResult]
 
+        lastRefreshCompleted = Date()
+        rateLimitedUntil = Self.rateLimitPause(results: results, now: Date())
         isRefreshing = false
-        return Self.nextPollingInterval(baseInterval: pollingIntervalSeconds, results: results)
     }
 
     func manualRefresh() {
@@ -149,18 +138,30 @@ final class UsageViewModel: ObservableObject {
     }
 
     func performManualRefresh(forceLiveWindsurf: Bool) async {
-        scheduler.resetBackoff()
         lastPrerequisitesCheck = nil
-        let nextInterval = await refresh(
+        await refresh(
             forceLiveWindsurf: forceLiveWindsurf,
             userInitiated: true
         )
-        scheduler.reschedule(after: nextInterval)
     }
 
-    func updatePollingInterval(_ seconds: Double) {
-        pollingIntervalSeconds = seconds
-        scheduler.updateBaseInterval(seconds)
+    /// Called when the menu bar window opens. Refreshes at most once per
+    /// `menuOpenRefreshThrottle` and never while a rate limit is in effect —
+    /// the explicit Refresh button bypasses both guards.
+    func refreshOnMenuOpen() {
+        Task { @MainActor in
+            // Guard inside the task: refresh() flips isRefreshing before its
+            // first suspension, so a second open trigger queued behind this
+            // one sees it and bails instead of double-fetching.
+            guard Self.shouldAutoRefreshOnMenuOpen(
+                lastRefreshCompleted: lastRefreshCompleted,
+                rateLimitedUntil: rateLimitedUntil,
+                isRefreshing: isRefreshing,
+                now: Date()
+            ) else { return }
+
+            await refresh(forceLiveWindsurf: false, userInitiated: true)
+        }
     }
 
     func setNotificationsEnabled(_ enabled: Bool) {
@@ -236,16 +237,6 @@ final class UsageViewModel: ObservableObject {
         [claudeUsage?.lastUpdated, codexUsage?.lastUpdated, windsurfUsage?.lastUpdated]
             .compactMap { $0 }
             .max()
-    }
-
-    var pollingIntervalLabel: String {
-        switch pollingIntervalSeconds {
-        case ...180: return "3 min"
-        case ...300: return "5 min"
-        case ...600: return "10 min"
-        case ...1800: return "30 min"
-        default: return "1 hr"
-        }
     }
 
     var worstLevel: UsageLevel {
@@ -330,23 +321,30 @@ final class UsageViewModel: ObservableObject {
         )
     }
 
-    nonisolated static func nextPollingInterval(
-        baseInterval: TimeInterval,
-        results: [RefreshResult]
-    ) -> TimeInterval {
-        let retryIntervals = results.compactMap { result -> TimeInterval? in
-            switch result {
-            case .rateLimited(let retryAfter):
-                if let retryAfter {
-                    return min(retryAfter + 30, maxAutomaticRetryInterval)
-                }
-                return min(baseInterval * 2, maxAutomaticRetryInterval)
-            case .skipped, .success, .failure:
-                return nil
-            }
+    nonisolated static func rateLimitPause(
+        results: [RefreshResult],
+        now: Date,
+        defaultPause: TimeInterval = UsageViewModel.defaultRateLimitPause
+    ) -> Date? {
+        let pauses = results.compactMap { result -> TimeInterval? in
+            guard case .rateLimited(let retryAfter) = result else { return nil }
+            return retryAfter ?? defaultPause
         }
 
-        return retryIntervals.max() ?? baseInterval
+        return pauses.max().map { now.addingTimeInterval($0) }
+    }
+
+    nonisolated static func shouldAutoRefreshOnMenuOpen(
+        lastRefreshCompleted: Date?,
+        rateLimitedUntil: Date?,
+        isRefreshing: Bool,
+        now: Date,
+        throttle: TimeInterval = UsageViewModel.menuOpenRefreshThrottle
+    ) -> Bool {
+        guard !isRefreshing else { return false }
+        if let rateLimitedUntil, now < rateLimitedUntil { return false }
+        if let lastRefreshCompleted, now.timeIntervalSince(lastRefreshCompleted) < throttle { return false }
+        return true
     }
 
     private func checkPrerequisitesAsync() async {
@@ -400,8 +398,8 @@ final class UsageViewModel: ObservableObject {
         } catch let error as UsageError {
             switch error {
             case .rateLimited(let retryAfter):
-                let retryText = retryAfter.map { " (retry in \(Int($0))s)" } ?? ""
-                errors.append("Claude Code: rate limited\(retryText) - will retry automatically")
+                let retryText = retryAfter.map { " - try again in \(Int($0))s" } ?? " - try again later"
+                errors.append("Claude Code: rate limited\(retryText)")
                 return .rateLimited(retryAfter: retryAfter)
             case .authExpired:
                 await claudeService.invalidateCredentialCache()
@@ -457,8 +455,8 @@ final class UsageViewModel: ObservableObject {
         } catch let error as UsageError {
             switch error {
             case .rateLimited(let retryAfter):
-                let retryText = retryAfter.map { " (retry in \(Int($0))s)" } ?? ""
-                errors.append("Codex: rate limited\(retryText) - will retry automatically")
+                let retryText = retryAfter.map { " - try again in \(Int($0))s" } ?? " - try again later"
+                errors.append("Codex: rate limited\(retryText)")
                 return .rateLimited(retryAfter: retryAfter)
             case .authExpired:
                 lastPrerequisitesCheck = nil

@@ -3,26 +3,71 @@ import XCTest
 
 @MainActor
 final class UsageViewModelTests: XCTestCase {
-    func testNextPollingIntervalUsesLongestRateLimitDelay() {
-        let interval = UsageViewModel.nextPollingInterval(
-            baseInterval: 300,
+    func testRateLimitPauseUsesLongestReportedRetryAfter() {
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        let pause = UsageViewModel.rateLimitPause(
             results: [
                 .success,
                 .rateLimited(retryAfter: 45),
                 .rateLimited(retryAfter: nil)
-            ]
+            ],
+            now: now,
+            defaultPause: 300
         )
 
-        XCTAssertEqual(interval, 600)
+        XCTAssertEqual(pause, now.addingTimeInterval(300))
     }
 
-    func testNextPollingIntervalFallsBackToBaseWhenNoRateLimitsOccur() {
-        let interval = UsageViewModel.nextPollingInterval(
-            baseInterval: 300,
-            results: [.success, .failure, .skipped]
+    func testRateLimitPauseIsNilWhenNoRateLimitsOccur() {
+        let pause = UsageViewModel.rateLimitPause(
+            results: [.success, .failure, .skipped],
+            now: Date(timeIntervalSince1970: 1_000)
         )
 
-        XCTAssertEqual(interval, 300)
+        XCTAssertNil(pause)
+    }
+
+    func testMenuOpenRefreshAllowedWhenIdleAndStale() {
+        let now = Date(timeIntervalSince1970: 10_000)
+
+        XCTAssertTrue(UsageViewModel.shouldAutoRefreshOnMenuOpen(
+            lastRefreshCompleted: nil,
+            rateLimitedUntil: nil,
+            isRefreshing: false,
+            now: now
+        ))
+        XCTAssertTrue(UsageViewModel.shouldAutoRefreshOnMenuOpen(
+            lastRefreshCompleted: now.addingTimeInterval(-61),
+            rateLimitedUntil: nil,
+            isRefreshing: false,
+            now: now,
+            throttle: 60
+        ))
+    }
+
+    func testMenuOpenRefreshSkippedWhenThrottledRateLimitedOrAlreadyRefreshing() {
+        let now = Date(timeIntervalSince1970: 10_000)
+
+        XCTAssertFalse(UsageViewModel.shouldAutoRefreshOnMenuOpen(
+            lastRefreshCompleted: now.addingTimeInterval(-30),
+            rateLimitedUntil: nil,
+            isRefreshing: false,
+            now: now,
+            throttle: 60
+        ), "recent refresh should throttle menu-open refreshes")
+        XCTAssertFalse(UsageViewModel.shouldAutoRefreshOnMenuOpen(
+            lastRefreshCompleted: now.addingTimeInterval(-600),
+            rateLimitedUntil: now.addingTimeInterval(120),
+            isRefreshing: false,
+            now: now
+        ), "active rate limit should block menu-open refreshes")
+        XCTAssertFalse(UsageViewModel.shouldAutoRefreshOnMenuOpen(
+            lastRefreshCompleted: nil,
+            rateLimitedUntil: nil,
+            isRefreshing: true,
+            now: now
+        ), "an in-flight refresh should not be duplicated")
     }
 
     func testInitSynchronizesLaunchAtLoginStateFromSystemController() {
@@ -319,7 +364,6 @@ final class UsageViewModelTests: XCTestCase {
                 requestPermissionHandler: { completion in completion(false) },
                 configureAuthorizationHandler: { _ in }
             ),
-            scheduler: PollingScheduler(interval: 0.01),
             autostart: true
         )
 
@@ -404,6 +448,69 @@ final class UsageViewModelTests: XCTestCase {
 
         XCTAssertEqual(finalClaudeCounts.invalidateCredentialCacheCallCount, 0)
         XCTAssertEqual(finalWindsurfCounts.fetchUsageArguments, [true])
+    }
+
+    func testMenuOpenRefreshFetchesOnceAndThrottlesImmediateReopen() async throws {
+        let claudeService = ClaudeUsageSpy(
+            usage: ServiceUsage(
+                id: "claude",
+                displayName: "Claude Code",
+                shortLabel: "CC",
+                windows: [],
+                lastUpdated: .distantPast,
+                error: nil
+            )
+        )
+        let codexService = CodexUsageSpy(
+            usage: ServiceUsage(
+                id: "codex",
+                displayName: "Codex",
+                shortLabel: "CX",
+                windows: [],
+                lastUpdated: .distantPast,
+                error: nil
+            )
+        )
+        let windsurfService = WindsurfUsageSpy(
+            usage: ServiceUsage(
+                id: "windsurf",
+                displayName: "Windsurf",
+                shortLabel: "W",
+                windows: [],
+                lastUpdated: .distantPast,
+                error: nil
+            )
+        )
+
+        let viewModel = UsageViewModel(
+            claudeService: claudeService,
+            codexService: codexService,
+            windsurfService: windsurfService,
+            cacheStore: InMemoryUsageCacheStore(),
+            autostart: false
+        )
+        viewModel.showClaude = true
+        viewModel.showCodex = true
+        viewModel.showWindsurf = true
+
+        // Two triggers in the same runloop (onAppear + didBecomeKey) must
+        // produce a single fetch.
+        viewModel.refreshOnMenuOpen()
+        viewModel.refreshOnMenuOpen()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        // Re-opening the menu right away stays within the throttle window.
+        viewModel.refreshOnMenuOpen()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let claudeCounts = await claudeService.snapshot()
+        let windsurfCounts = await windsurfService.snapshot()
+
+        XCTAssertEqual(claudeCounts.fetchUsageCallCount, 1)
+        // Menu-open refreshes must not force the live Windsurf scrape.
+        XCTAssertEqual(windsurfCounts.fetchUsageArguments, [false])
+        XCTAssertNotNil(viewModel.lastRefreshCompleted)
+        XCTAssertNil(viewModel.rateLimitedUntil)
     }
 
     func testDisplayedServicesShowWaitingPlaceholdersBeforeFirstRefresh() {

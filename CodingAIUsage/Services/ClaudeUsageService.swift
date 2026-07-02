@@ -186,9 +186,9 @@ actor ClaudeUsageService: ClaudeUsageServing {
         }
 
         if httpResponse.statusCode == 429 {
-            // The token endpoint is rate-limited. Surface this as .rateLimited (not .httpError) so the
-            // poller backs off by Retry-After instead of re-refreshing every poll — a near-expiry token
-            // makes needsRefresh true on every cycle, so hammering here keeps the rate limit alive.
+            // The token endpoint is rate-limited. Surface this as .rateLimited (not .httpError) so
+            // menu-open refreshes pause for Retry-After — a near-expiry token makes needsRefresh true
+            // on every fetch, so retrying here before the limit clears keeps the rate limit alive.
             let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After")
                 .flatMap { Double($0) }
             throw UsageError.rateLimited(retryAfter: retryAfter)
