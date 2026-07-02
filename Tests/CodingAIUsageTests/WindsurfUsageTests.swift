@@ -16,7 +16,8 @@ final class WindsurfUsageTests: XCTestCase {
                     resetAt: nil
                 ),
                 secondaryWindow: nil
-            )
+            ),
+            rateLimitResetCredits: nil
         )
 
         let before = Date()

@@ -7,8 +7,22 @@ protocol CodexUsageServing: Sendable {
 }
 
 actor CodexUsageService: CodexUsageServing {
-    private let authFilePath = NSHomeDirectory() + "/.codex/auth.json"
+    typealias NetworkClient = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
+    private let authFilePath: String
+    private let networkClient: NetworkClient
     private let usageURL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+    private let resetCreditsURL = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")!
+
+    init(
+        authFilePath: String = NSHomeDirectory() + "/.codex/auth.json",
+        networkClient: @escaping NetworkClient = { request in
+            try await URLSession.shared.data(for: request)
+        }
+    ) {
+        self.authFilePath = authFilePath
+        self.networkClient = networkClient
+    }
 
     func fetchUsage() async throws -> ServiceUsage {
         guard let auth = readAuthFile() else {
@@ -19,15 +33,16 @@ actor CodexUsageService: CodexUsageServing {
             throw UsageError.noCredentials("Codex: no access token found")
         }
 
-        var request = URLRequest(url: usageURL)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 15
+        let request = makeRequest(url: usageURL, accessToken: accessToken)
+
+        // Both requests need only the access token, so run them concurrently.
+        // The reset-credits leg is only awaited on the 200 path; on any error
+        // path it is left unawaited and Swift cancels it automatically.
+        async let resetCreditsTask = fetchResetCredits(accessToken: accessToken)
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await networkClient(request)
         } catch {
             throw UsageError.networkError("Codex: \(error.localizedDescription)")
         }
@@ -39,7 +54,8 @@ actor CodexUsageService: CodexUsageServing {
         switch httpResponse.statusCode {
         case 200:
             let usage = try JSONDecoder().decode(CodexUsageResponse.self, from: data)
-            return usage.toServiceUsage()
+            let resetCredits = await resetCreditsTask
+            return usage.toServiceUsage(resetCredits: resetCredits)
         case 401, 403:
             throw UsageError.authExpired("Codex: session expired - run 'codex login' to re-authenticate")
         case 429:
@@ -49,6 +65,32 @@ actor CodexUsageService: CodexUsageServing {
         default:
             throw UsageError.httpError(httpResponse.statusCode)
         }
+    }
+
+    /// Best-effort: reset credits enrich the usage display with expirations,
+    /// but their absence must never fail the refresh (the usage response
+    /// still carries the bare available count as a fallback).
+    private func fetchResetCredits(accessToken: String) async -> CodexResetCreditsResponse? {
+        let request = makeRequest(url: resetCreditsURL, accessToken: accessToken)
+
+        guard
+            let (data, response) = try? await networkClient(request),
+            let httpResponse = response as? HTTPURLResponse,
+            httpResponse.statusCode == 200
+        else {
+            return nil
+        }
+
+        return try? JSONDecoder().decode(CodexResetCreditsResponse.self, from: data)
+    }
+
+    private func makeRequest(url: URL, accessToken: String) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 15
+        return request
     }
 
     private func readAuthFile() -> CodexAuthFile? {

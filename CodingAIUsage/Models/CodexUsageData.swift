@@ -25,9 +25,19 @@ struct CodexTokens: Codable {
 // Matches the actual response from https://chatgpt.com/backend-api/wham/usage
 struct CodexUsageResponse: Codable {
     let rateLimit: CodexRateLimit?
+    let rateLimitResetCredits: CodexResetCreditsCount?
 
     enum CodingKeys: String, CodingKey {
         case rateLimit = "rate_limit"
+        case rateLimitResetCredits = "rate_limit_reset_credits"
+    }
+
+    struct CodexResetCreditsCount: Codable {
+        let availableCount: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case availableCount = "available_count"
+        }
     }
 
     struct CodexRateLimit: Codable {
@@ -58,7 +68,10 @@ struct CodexUsageResponse: Codable {
         }
     }
 
-    func toServiceUsage(now: Date = Date()) -> ServiceUsage {
+    func toServiceUsage(
+        now: Date = Date(),
+        resetCredits: CodexResetCreditsResponse? = nil
+    ) -> ServiceUsage {
         var windows: [UsageWindow] = []
 
         if let primary = rateLimit?.primaryWindow {
@@ -96,7 +109,79 @@ struct CodexUsageResponse: Codable {
             windows: windows,
             lastUpdated: Date(),
             error: nil,
-            footerLines: []
+            footerLines: Self.resetCreditsFooterLines(
+                resetCredits: resetCredits,
+                fallbackAvailableCount: rateLimitResetCredits?.availableCount
+            )
         )
+    }
+
+    /// Builds a single footer line of the form
+    /// "Rate limit resets: <N> available (first expires <date>)".
+    /// The detail endpoint provides per-credit expirations; when it is
+    /// unavailable, fall back to the bare count from the usage response.
+    static func resetCreditsFooterLines(
+        resetCredits: CodexResetCreditsResponse?,
+        fallbackAvailableCount: Int?
+    ) -> [String] {
+        if let resetCredits {
+            let available = resetCredits.availableCredits
+            guard !available.isEmpty else {
+                return ["Rate limit resets: none available"]
+            }
+
+            var line = "Rate limit resets: \(available.count) available"
+            if let firstExpiration = available.compactMap(\.expirationDate).min() {
+                let formatter = DateFormatter()
+                formatter.dateStyle = .medium
+                formatter.timeStyle = .none
+                line += " (first expires \(formatter.string(from: firstExpiration)))"
+            }
+            return [line]
+        }
+
+        if let fallbackAvailableCount {
+            return fallbackAvailableCount > 0
+                ? ["Rate limit resets: \(fallbackAvailableCount) available"]
+                : ["Rate limit resets: none available"]
+        }
+
+        return []
+    }
+}
+
+// Matches the response from https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
+struct CodexResetCreditsResponse: Codable {
+    let credits: [CodexResetCredit]
+
+    struct CodexResetCredit: Codable {
+        let status: String?
+        let expiresAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case status
+            case expiresAt = "expires_at"
+        }
+
+        var expirationDate: Date? {
+            expiresAt.flatMap(CodexResetCreditsResponse.parseTimestamp)
+        }
+    }
+
+    var availableCredits: [CodexResetCredit] {
+        credits.filter { $0.status == "available" }
+    }
+
+    /// The API sends timestamps with microsecond fractions (a fractional
+    /// seconds component like ".780413"), which ISO8601DateFormatter rejects;
+    /// sub-second precision is irrelevant here, so strip the fraction before
+    /// parsing.
+    static func parseTimestamp(_ raw: String) -> Date? {
+        let normalized = raw.replacingOccurrences(
+            of: #"\.\d+"#,
+            with: "",
+            options: .regularExpression
+        )
+        return ISO8601DateFormatter().date(from: normalized)
     }
 }
