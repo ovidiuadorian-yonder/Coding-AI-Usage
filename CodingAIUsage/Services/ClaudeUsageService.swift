@@ -185,6 +185,15 @@ actor ClaudeUsageService: ClaudeUsageServing {
             throw UsageError.authExpired("Claude Code: session expired - please re-login in Claude Code")
         }
 
+        if httpResponse.statusCode == 429 {
+            // The token endpoint is rate-limited. Surface this as .rateLimited (not .httpError) so the
+            // poller backs off by Retry-After instead of re-refreshing every poll — a near-expiry token
+            // makes needsRefresh true on every cycle, so hammering here keeps the rate limit alive.
+            let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After")
+                .flatMap { Double($0) }
+            throw UsageError.rateLimited(retryAfter: retryAfter)
+        }
+
         guard httpResponse.statusCode == 200 else {
             throw UsageError.httpError(httpResponse.statusCode)
         }

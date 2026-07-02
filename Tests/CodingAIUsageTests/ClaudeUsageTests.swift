@@ -596,4 +596,48 @@ final class ClaudeUsageTests: XCTestCase {
             }
         }
     }
+
+    func testClaudeUsageServiceSurfacesRefreshRateLimitAsRateLimited() async throws {
+        // A near-expiry token triggers a proactive refresh on every poll. When the token endpoint
+        // itself is rate-limited we must surface .rateLimited (with Retry-After) so polling backs off,
+        // rather than .httpError(429) which keeps hammering the endpoint at the base interval.
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-refresh-429-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let filePath = tempDir.appendingPathComponent(".claude/.credentials.json")
+        try FileManager.default.createDirectory(at: filePath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try #"{"claudeAiOauth":{"accessToken":"stale-token","refreshToken":"refresh-token","expiresAt":0}}"#
+            .write(to: filePath, atomically: true, encoding: .utf8)
+
+        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: .empty)
+        let service = ClaudeUsageService(
+            credentialLoader: loader,
+            networkClient: { request in
+                XCTAssertEqual(request.url?.absoluteString, "https://platform.claude.com/v1/oauth/token")
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 429,
+                    httpVersion: nil,
+                    headerFields: ["Retry-After": "120"]
+                )!
+                return (Data(), response)
+            },
+            cliExecutor: { _, _ in
+                XCTFail("CLI should not be used when file credentials exist")
+                return .init(exitCode: 1, output: "")
+            },
+            claudeBinaryLocator: { nil }
+        )
+
+        do {
+            _ = try await service.fetchUsage()
+            XCTFail("expected fetchUsage to throw when the refresh endpoint is rate-limited")
+        } catch let error as UsageError {
+            guard case .rateLimited(let retryAfter) = error else {
+                XCTFail("expected .rateLimited, got \(error)")
+                return
+            }
+            XCTAssertEqual(retryAfter, 120)
+        }
+    }
 }
