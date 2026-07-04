@@ -40,7 +40,7 @@ struct SettingsView: View {
             // Refresh behavior
             GroupBox("Refresh") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Usage is fetched only when you open this menu (at most once a minute) or click Refresh. There is no background polling.")
+                    Text("Usage is fetched only when you open this menu or click Refresh. Menu opens are throttled, and recent Claude Code snapshots are reused for 15 minutes to avoid API rate limits. There is no background polling.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -39,6 +39,7 @@ final class UsageViewModel: ObservableObject {
     private(set) var lastRefreshCompleted: Date?
     private(set) var rateLimitedUntil: Date?
     nonisolated static let menuOpenRefreshThrottle: TimeInterval = 60
+    nonisolated static let claudeAutoRefreshStaleInterval: TimeInterval = 900
     nonisolated static let defaultRateLimitPause: TimeInterval = 300
 
     // Status checks (re-checked every 10 min, on wake, on manual refresh, and on auth errors)
@@ -100,7 +101,8 @@ final class UsageViewModel: ObservableObject {
 
     func refresh(
         forceLiveWindsurf: Bool = true,
-        userInitiated: Bool = false
+        userInitiated: Bool = false,
+        allowProviderCache: Bool = false
     ) async {
         isRefreshing = true
         errors.removeAll()
@@ -121,7 +123,7 @@ final class UsageViewModel: ObservableObject {
             lastPrerequisitesCheck = Date()
         }
 
-        async let claudeResult: RefreshResult = fetchClaude()
+        async let claudeResult: RefreshResult = fetchClaude(allowCachedSnapshot: allowProviderCache)
         async let codexResult: RefreshResult = fetchCodex()
         async let windsurfResult: RefreshResult = fetchWindsurf(preferLiveRefresh: forceLiveWindsurf)
         let results = await [claudeResult, codexResult, windsurfResult]
@@ -141,7 +143,8 @@ final class UsageViewModel: ObservableObject {
         lastPrerequisitesCheck = nil
         await refresh(
             forceLiveWindsurf: forceLiveWindsurf,
-            userInitiated: true
+            userInitiated: true,
+            allowProviderCache: false
         )
     }
 
@@ -160,7 +163,7 @@ final class UsageViewModel: ObservableObject {
                 now: Date()
             ) else { return }
 
-            await refresh(forceLiveWindsurf: false, userInitiated: true)
+            await refresh(forceLiveWindsurf: false, userInitiated: true, allowProviderCache: true)
         }
     }
 
@@ -347,6 +350,18 @@ final class UsageViewModel: ObservableObject {
         return true
     }
 
+    nonisolated static func shouldReuseClaudeSnapshot(
+        _ usage: ServiceUsage?,
+        now: Date,
+        staleInterval: TimeInterval = UsageViewModel.claudeAutoRefreshStaleInterval
+    ) -> Bool {
+        guard let usage, usage.error == nil, !usage.windows.isEmpty else {
+            return false
+        }
+
+        return now.timeIntervalSince(usage.lastUpdated) < staleInterval
+    }
+
     private func checkPrerequisitesAsync() async {
         let claudeBinaryInstalled = await claudeService.checkInstalled()
         let claudeHasCredentialFile = await claudeService.hasCredentialFile()
@@ -381,12 +396,15 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
-    private func fetchClaude() async -> RefreshResult {
+    private func fetchClaude(allowCachedSnapshot: Bool = false) async -> RefreshResult {
         guard showClaude else {
             claudeUsage = nil
             return .skipped
         }
         guard claudeInstalled, claudeLoggedIn else { return .skipped }
+        if allowCachedSnapshot, Self.shouldReuseClaudeSnapshot(claudeUsage, now: Date()) {
+            return .skipped
+        }
         claudeUsage = Self.retryingFetchUsage(previous: claudeUsage)
 
         do {

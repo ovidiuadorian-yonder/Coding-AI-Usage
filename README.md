@@ -167,7 +167,7 @@ The status bar text updates whenever a refresh runs (opening the dropdown or cli
 
 ### Dropdown Panel
 
-Click the menu bar text to open the detail panel. Opening the panel triggers a refresh (at most once a minute, and never while a provider rate limit is active):
+Click the menu bar text to open the detail panel. Opening the panel triggers a refresh (at most once a minute, and never while a provider rate limit is active). Claude Code snapshots under 15 minutes old are reused on menu-open refreshes to avoid hitting Anthropic's usage API too often:
 
 - **Progress bars** for each time window with color coding
 - **Reset timers** showing when each window resets
@@ -204,7 +204,7 @@ The app reads locally stored credentials and usage state:
 - **Last known usage is cached locally** - successful refreshes are persisted and restored on relaunch so the dropdown is not empty between sessions
 - **Windsurf exact daily/weekly quotas are required** - billing-cycle-only cache data is not shown in the compact menu bar
 - **Windsurf local source order** - cached user-status protobuf first, cached JSON snapshot second, experimental authenticated scrape last
-- **No background polling** - refreshes run only when you open the menu (throttled to once a minute) or click Refresh
+- **No background polling** - refreshes run only when you open the menu (throttled to once a minute, with a 15-minute Claude Code cache window) or click Refresh
 - When a provider reports a rate limit, menu-open refreshes pause until the reported `Retry-After` expires (5 minutes if none is given); clicking **Refresh** retries immediately
 
 ---

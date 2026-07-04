@@ -513,6 +513,121 @@ final class UsageViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.rateLimitedUntil)
     }
 
+    func testMenuOpenRefreshReusesFreshClaudeSnapshotWhileRefreshingOtherProviders() async throws {
+        let cacheStore = InMemoryUsageCacheStore()
+        cacheStore.save(
+            ServiceUsage(
+                id: "claude",
+                displayName: "Claude Code",
+                shortLabel: "CC",
+                windows: [
+                    UsageWindow(id: "five_hour", name: "5-Hour", compactLabel: "5h", utilization: 0.20, resetTime: nil)
+                ],
+                lastUpdated: Date(),
+                error: nil
+            )
+        )
+
+        let claudeService = ClaudeUsageSpy(
+            usage: ServiceUsage(
+                id: "claude",
+                displayName: "Claude Code",
+                shortLabel: "CC",
+                windows: [],
+                lastUpdated: .distantPast,
+                error: nil
+            )
+        )
+        let codexService = CodexUsageSpy(
+            usage: ServiceUsage(
+                id: "codex",
+                displayName: "Codex",
+                shortLabel: "CX",
+                windows: [],
+                lastUpdated: .distantPast,
+                error: nil
+            )
+        )
+        let windsurfService = WindsurfUsageSpy(
+            usage: ServiceUsage(
+                id: "windsurf",
+                displayName: "Windsurf",
+                shortLabel: "W",
+                windows: [],
+                lastUpdated: .distantPast,
+                error: nil
+            )
+        )
+
+        let viewModel = UsageViewModel(
+            claudeService: claudeService,
+            codexService: codexService,
+            windsurfService: windsurfService,
+            cacheStore: cacheStore,
+            autostart: false
+        )
+        viewModel.showClaude = true
+        viewModel.showCodex = true
+        viewModel.showWindsurf = true
+
+        viewModel.refreshOnMenuOpen()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let claudeCounts = await claudeService.snapshot()
+        let codexCounts = await codexService.snapshot()
+        let windsurfCounts = await windsurfService.snapshot()
+
+        XCTAssertEqual(claudeCounts.fetchUsageCallCount, 0)
+        XCTAssertEqual(codexCounts.fetchUsageCallCount, 1)
+        XCTAssertEqual(windsurfCounts.fetchUsageArguments, [false])
+        XCTAssertEqual(viewModel.claudeUsage?.fiveHourWindow?.remainingPercent, 80)
+    }
+
+    func testManualRefreshFetchesClaudeEvenWhenSnapshotIsFresh() async throws {
+        let cacheStore = InMemoryUsageCacheStore()
+        cacheStore.save(
+            ServiceUsage(
+                id: "claude",
+                displayName: "Claude Code",
+                shortLabel: "CC",
+                windows: [
+                    UsageWindow(id: "five_hour", name: "5-Hour", compactLabel: "5h", utilization: 0.20, resetTime: nil)
+                ],
+                lastUpdated: Date(),
+                error: nil
+            )
+        )
+
+        let claudeService = ClaudeUsageSpy(
+            usage: ServiceUsage(
+                id: "claude",
+                displayName: "Claude Code",
+                shortLabel: "CC",
+                windows: [
+                    UsageWindow(id: "five_hour", name: "5-Hour", compactLabel: "5h", utilization: 0.10, resetTime: nil)
+                ],
+                lastUpdated: Date(),
+                error: nil
+            )
+        )
+
+        let viewModel = UsageViewModel(
+            claudeService: claudeService,
+            cacheStore: cacheStore,
+            autostart: false
+        )
+        viewModel.showClaude = true
+        viewModel.showCodex = false
+        viewModel.showWindsurf = false
+
+        await viewModel.performManualRefresh(forceLiveWindsurf: false)
+
+        let claudeCounts = await claudeService.snapshot()
+
+        XCTAssertEqual(claudeCounts.fetchUsageCallCount, 1)
+        XCTAssertEqual(viewModel.claudeUsage?.fiveHourWindow?.remainingPercent, 90)
+    }
+
     func testDisplayedServicesShowWaitingPlaceholdersBeforeFirstRefresh() {
         let viewModel = UsageViewModel(
             cacheStore: InMemoryUsageCacheStore(),
