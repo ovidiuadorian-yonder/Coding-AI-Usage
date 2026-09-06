@@ -88,33 +88,67 @@ Devin DB.
 ### Part B — A uniform freshness gate on local sources
 
 Every local source is subject to one rule before it may contribute to a reading. A source is
-**expired** when its own timestamps say so:
+**expired** when its **billing period end is in the past**. That is the whole rule.
 
-- its billing period end is in the past, **or**
-- both its daily and weekly reset timestamps are in the past.
+> **Revised 2026-09-07 after the prerequisite parser check.** An earlier draft also expired a
+> source when *both* its daily and weekly reset timestamps were in the past. Running the parser
+> against the live Devin proto disproved that rule: at `2026-09-06T21:06Z` it yields
+> `dailyReset=2026-09-04` and `weeklyReset=2026-09-06`, **both already past**, while the data
+> itself is current (`planEnd=2026-09-28`, `balance=$1851.15`). The reset fields are not
+> maintained as "next reset" — they lag behind whenever the client last synced quota. The
+> discarded rule would have rejected the live source and shown nothing, turning wrong numbers
+> into no numbers. Reset timestamps must therefore play no part in staleness.
 
-A source carrying **none** of these timestamps cannot be judged and is retained; the gate
-demotes sources proven stale, it does not require proof of freshness. No source in the current
-schema falls into this case, and any that did would still be subordinate to the proto in the
-existing precedence order.
+`planEndDate` is the field that actually tracks freshness. On the machine this was verified
+against it separates the two sources cleanly and correctly:
+
+| source | planEnd | verdict |
+|---|---|---|
+| Devin | 2026-09-28 (future) | **kept** |
+| Windsurf | 2026-06-28 (past) | **discarded** |
+
+A source carrying **no** billing period end cannot be judged and is retained; the gate demotes
+sources proven stale, it does not require proof of freshness. Failing closed was considered and
+rejected: it would blank the row for any user whose proto omits the field, and there is no
+evidence about how common that is.
 
 An expired source is **discarded, not merged**. The rule is applied uniformly to:
 
-- `windsurf.settings.cachedPlanInfo` (`readCachedPlanInfo`),
-- the proto snapshot from `userStatusProtoBinaryBase64`,
+- `windsurf.settings.cachedPlanInfo` (`readCachedPlanInfo`), whose `endTimestamp` is the field,
+- the proto snapshot from `userStatusProtoBinaryBase64`, whose `planEndDate` is the field,
 - the `codeium.windsurf` JSON candidates (`windsurf.state.cachedUsageSnapshot`,
-  `cachedQuotaSnapshot`, `cachedUsagePageSnapshot`).
+  `cachedQuotaSnapshot`, `cachedUsagePageSnapshot`), which carry the plan end only via the
+  merged plan info and are therefore judged on it when present.
 
-Consequences on today's data: the fossil `cachedPlanInfo` is dropped, and the live proto is
-accepted. `merge(snapshot:fallbackPlanInfo:)` receives `nil` for the fallback rather than stale
-values, so `planEndDate` comes from the proto or is absent.
+Consequences on today's data: the fossil `cachedPlanInfo` (period ended 2026-05-28) is dropped,
+and the live Devin proto is accepted. `merge(snapshot:fallbackPlanInfo:)` receives `nil` for the
+fallback rather than stale values, so `planEndDate` comes from the proto or is absent.
 
 If **every** source fails the gate, the row reports no usage and surfaces the existing
 "exact quota data unavailable" state. Showing nothing is correct; showing 102-day-old
 percentages as current is not.
 
-A general gate is chosen over a targeted `endTimestamp` check so the next source to be quietly
-abandoned by the vendor fails closed rather than silently.
+### Part B2 — Render elapsed resets honestly
+
+Independent of staleness, the app currently formats a reset that has already passed as though it
+were still ahead, by rendering the absolute difference. Verified against the stale Windsurf
+source at `2026-09-06T21:06Z`:
+
+| field | stored value | in the past by | displayed as |
+|---|---|---|---|
+| `dailyResetTime` | 2026-06-04 | 3 months 2 days | "Resets 3 mths, 2 days" |
+| `weeklyResetTime` | 2026-06-07 | 2 months 30 days | "Resets 2 mths, 30 days" |
+
+Both matched exactly, so the mechanism is not in doubt. A *daily* quota claiming to reset in
+three months is self-evidently wrong, and it was being shown next to a green "Healthy" badge.
+
+The reset formatter must therefore distinguish a future reset from a past one and never present
+elapsed time as remaining time. A past reset renders as overdue rather than as a countdown.
+
+This is a defect in the **shared** formatter, not in the Windsurf provider, so the fix applies to
+the Claude and Codex rows too. It is included here because the freshness gate alone does not
+address it: a source can pass the gate — a valid billing period — while still carrying a reset
+timestamp that has elapsed, which is exactly the state the live Devin proto is in right now.
 
 ### Part C — Delete the scrape subsystem
 
@@ -171,10 +205,11 @@ prompts users would struggle to attribute.
   blank rather than degrading to a scrape. Accepted: the discarded alternative was serving
   102-day-old numbers as current. The freshness gate in Part B makes the failure visible instead
   of silent.
-- **Proto compatibility is inferred, not proven.** Evidence is a timestamp scan of the decoded
-  bytes, not a parse by `WindsurfUserStatusProtoParser`. The first implementation step must be a
-  test that runs the existing parser against a fixture captured from the Devin DB; if it fails,
-  parser changes enter scope and this spec is revised before proceeding.
+- ~~**Proto compatibility is inferred, not proven.**~~ **Resolved 2026-09-07.**
+  `WindsurfUserStatusProtoParser` was run against the live Devin proto and parsed it **without
+  modification**, returning `dailyUsed=0% weeklyUsed=1% planEnd=2026-09-28 balance=$1851.15`.
+  No parser changes are needed. The check did, however, invalidate the original freshness rule —
+  see the revision note in Part B.
 - **mtime-based selection assumes the active client writes on use.** The Devin DB was modified
   the same day it was inspected, supporting this. If both DBs were somehow equally fresh, the
   tie resolves to Devin.
@@ -200,22 +235,33 @@ asserting `preferLiveRefresh` behaviour.
 
 **New — freshness gate (Part B):**
 
-- A `cachedPlanInfo` fixture with the real fossil timestamps is rejected.
-- A live proto fixture is accepted in the same read.
-- A source whose billing period has ended is discarded.
-- A source with both resets in the past is discarded.
-- A source with an expired daily reset but a future weekly reset is **retained** (the rule
-  requires both).
+- A source whose billing period end is in the past is discarded.
+- A source whose billing period end is in the future is retained.
+- A source carrying no billing period end is retained (the gate does not require proof of
+  freshness).
+- **A source with a future billing period end but both resets already in the past is retained** —
+  this is the live Devin proto's actual state, and the case the original rule got wrong.
+- A `cachedPlanInfo` fixture with the fossil's `endTimestamp` (2026-05-28) is rejected while a
+  proto fixture with a future plan end is accepted in the same read.
 - All sources stale → no usage reported, no stale percentages surfaced.
+
+**New — reset rendering (Part B2):**
+
+- A reset timestamp in the future renders as a countdown, as today.
+- A reset timestamp in the past renders as overdue, **not** as the elapsed interval. Regression
+  fixture: 2026-06-04 evaluated at 2026-09-06 must not render "3 mths, 2 days".
+- A nil reset renders as it does today.
 
 **New — naming (Part D):**
 
 - `displayName == "Devin"` while `id == "windsurf"`.
 - A snapshot persisted under the previous build's `"windsurf"` id still loads.
 
-**Prerequisite test:** `WindsurfUserStatusProtoParser` parses a fixture captured from the Devin
-DB and yields daily/weekly percentages plus reset dates. This gates the rest of the work — see
-Risks.
+**Prerequisite test — satisfied.** `WindsurfUserStatusProtoParser` was run against the live
+Devin proto and parsed it unmodified. Committed tests keep using synthetic protos built from the
+known field numbers (14-18), matching the existing
+`testUserStatusProtoParserExtractsQuotaAndBalanceFromNestedMessage`; the captured proto is **not**
+committed, as it is account status data.
 
 **Manual:** with Devin running, refresh and confirm the row shows daily/weekly percentages whose
 resets are in the future and which track the Devin UI; confirm no Keychain prompt occurs (the
