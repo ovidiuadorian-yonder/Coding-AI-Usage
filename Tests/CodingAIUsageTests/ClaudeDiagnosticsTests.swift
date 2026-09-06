@@ -35,8 +35,7 @@ final class ClaudeDiagnosticsTests: XCTestCase {
     private func makeCredentialsDirectory(
         accessToken: String,
         refreshToken: String,
-        expiresAt: Int,
-        function: String = #function
+        expiresAt: Int
     ) throws -> String {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("claude-diag-\(UUID().uuidString)", isDirectory: true)
@@ -172,6 +171,57 @@ final class ClaudeDiagnosticsTests: XCTestCase {
 
         let line = try XCTUnwrap(spy.line(containing: "endpoint=usage"))
         XCTAssertTrue(line.contains("retry-after=absent"), line)
+    }
+
+    func testServerSuppliedErrorCodeCannotForgeAnExtraLogLine() async throws {
+        // The line is logged .public and is parsed by eye and by grep, so a newline in a
+        // server-supplied value must not be able to fabricate a second, plausible-looking record.
+        let home = try makeCredentialsDirectory(
+            accessToken: "stale-token",
+            refreshToken: "consumed-refresh",
+            expiresAt: 0
+        )
+        let spy = DiagnosticSpy()
+        let service = ClaudeUsageService(
+            credentialLoader: ClaudeCredentialLoader(homeDirectory: home, keychainService: .empty),
+            networkClient: { request in
+                let response = HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!
+                return (Data(#"{"error":"bad\nendpoint=usage status=429 retry-after=absent"}"#.utf8), response)
+            },
+            cliExecutor: { _, _ in .init(exitCode: 1, output: "") },
+            claudeBinaryLocator: { nil },
+            diagnostic: { spy.record($0) }
+        )
+
+        _ = try? await service.fetchUsage()
+
+        // The neutralized text may still appear *inside* the error field — that is fine and is the
+        // point. What must not happen is a second record, or a record that a line-oriented reader
+        // would attribute to the usage endpoint. So assert on record boundaries, not on substrings.
+        XCTAssertEqual(spy.lines.count, 1, "expected exactly one record, got \(spy.lines)")
+        let line = try XCTUnwrap(spy.lines.first)
+        XCTAssertFalse(line.contains("\n"), "record must stay a single line: \(line)")
+        XCTAssertTrue(line.hasPrefix("endpoint=token "), line)
+        XCTAssertFalse(
+            spy.lines.contains { $0.hasPrefix("endpoint=usage") },
+            "forged usage-endpoint record: \(spy.lines)"
+        )
+    }
+
+    func testOverlongErrorCodeIsTruncated() throws {
+        let long = String(repeating: "x", count: 500)
+        let field = DiagnosticLog.field(long)
+        XCTAssertTrue(field.hasSuffix("<truncated>"), field)
+        XCTAssertLessThan(field.count, 100)
+    }
+
+    func testFingerprintIsEightHexCharacters() throws {
+        let fingerprint = DiagnosticLog.fingerprint("some-token")
+        XCTAssertEqual(fingerprint.count, 8, fingerprint)
+        XCTAssertTrue(fingerprint.allSatisfy { $0.isHexDigit }, fingerprint)
+        XCTAssertEqual(DiagnosticLog.fingerprint("some-token"), fingerprint, "must be stable")
+        XCTAssertNotEqual(DiagnosticLog.fingerprint("other-token"), fingerprint)
+        XCTAssertEqual(DiagnosticLog.fingerprint(nil), "none")
     }
 
     // MARK: - Rotation probe

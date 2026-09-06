@@ -179,20 +179,17 @@ actor ClaudeUsageService: ClaudeUsageServing {
         }
 
         if httpResponse.statusCode == 400 || httpResponse.statusCode == 401 {
-            let loggedErrorCode = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
-                .flatMap { $0?["error"] as? String } ?? "unknown"
+            // Every 400/401 from this endpoint means the same thing to us — the stored grant is no
+            // longer usable — so the error code is recorded for diagnosis rather than branched on.
+            // `invalid_grant` specifically is the signature of the concurrent-client conflict.
+            let errorCode = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                .flatMap { $0?["error"] as? String }
             logEndpoint(
                 "token",
                 status: httpResponse.statusCode,
                 response: httpResponse,
-                extra: "error=\(loggedErrorCode)"
+                extra: "error=" + DiagnosticLog.field(errorCode ?? "unknown")
             )
-
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let errorCode = json["error"] as? String,
-               errorCode == "invalid_grant" {
-                throw UsageError.authExpired("Claude Code: session expired - please re-login in Claude Code")
-            }
 
             throw UsageError.authExpired("Claude Code: session expired - please re-login in Claude Code")
         }
@@ -222,10 +219,13 @@ actor ClaudeUsageService: ClaudeUsageServing {
         // superseded by our refresh — the mechanism behind CodexBar #1161. Fingerprints only.
         let returnedRefreshToken = refreshResponse["refresh_token"] as? String
         let changed = returnedRefreshToken != nil && returnedRefreshToken != refreshToken
-        diagnostic(
-            "endpoint=token status=200 refresh-token-changed=\(changed) "
-            + "sent=\(DiagnosticLog.fingerprint(refreshToken)) "
-            + "returned=\(DiagnosticLog.fingerprint(returnedRefreshToken))"
+        logEndpoint(
+            "token",
+            status: 200,
+            response: httpResponse,
+            extra: "refresh-token-changed=\(changed) "
+                + "sent=\(DiagnosticLog.fingerprint(refreshToken)) "
+                + "returned=\(DiagnosticLog.fingerprint(returnedRefreshToken))"
         )
 
         let expiresAt = (refreshResponse["expires_in"] as? Double)
@@ -280,8 +280,11 @@ actor ClaudeUsageService: ClaudeUsageServing {
         }
     }
 
-    /// Emits one machine-greppable line per non-success response, tagged with the endpoint that
-    /// produced it. `endpoint=usage` is api.anthropic.com; `endpoint=token` is platform.claude.com.
+    /// Emits one machine-greppable line per logged response, tagged with the endpoint that produced
+    /// it. `endpoint=usage` is api.anthropic.com; `endpoint=token` is platform.claude.com.
+    ///
+    /// Every line shares the shape `endpoint=… status=… retry-after=… [extra]`, so a single parser
+    /// covers all of them — including the successful-refresh line carrying the rotation signal.
     private func logEndpoint(
         _ endpoint: String,
         status: Int,

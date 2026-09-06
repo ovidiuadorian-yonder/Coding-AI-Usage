@@ -36,13 +36,32 @@ enum DiagnosticLog {
     static func fingerprint(_ value: String?) -> String {
         guard let value, !value.isEmpty else { return "none" }
         let digest = SHA256.hash(data: Data(value.utf8))
-        return digest.compactMap { String(format: "%02x", $0) }.prefix(8).joined()
+        // Take the prefix of the joined hex string, not of the array of two-character bytes —
+        // prefixing the array would yield twice the requested number of characters.
+        return String(digest.map { String(format: "%02x", $0) }.joined().prefix(8))
     }
 
     /// Formats a `Retry-After` value, recording its absence explicitly. Sources disagree on whether
     /// the header is sent at all, so "not present" is itself a finding worth capturing.
     static func retryAfter(_ value: String?) -> String {
         guard let value, !value.isEmpty else { return "absent" }
-        return value
+        return field(value)
+    }
+
+    /// Sanitizes a server-supplied value for inclusion in a log line.
+    ///
+    /// Every line is one whitespace-separated `key=value` record, and the whole line is logged
+    /// `.public`. An unsanitized value containing a newline would forge an additional line that
+    /// reads like a genuine event — which would corrupt the endpoint attribution this logging
+    /// exists to establish. Collapse whitespace and bound the length.
+    static func field(_ value: String, maxLength: Int = 64) -> String {
+        let collapsed = value
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: "_")
+        guard !collapsed.isEmpty else { return "empty" }
+        return collapsed.count <= maxLength
+            ? collapsed
+            : String(collapsed.prefix(maxLength)) + "<truncated>"
     }
 }
