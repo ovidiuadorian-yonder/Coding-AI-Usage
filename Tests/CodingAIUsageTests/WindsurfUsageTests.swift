@@ -32,200 +32,6 @@ final class WindsurfUsageTests: XCTestCase {
         }
     }
 
-    func testManualRefreshPrefersLiveSnapshotOverCachedSnapshot() {
-        let cached = WindsurfPageSnapshot(
-            dailyUsagePercent: 1,
-            weeklyUsagePercent: 19,
-            dailyResetTime: nil,
-            weeklyResetTime: nil,
-            extraUsageBalance: "$1371.44",
-            planEndDate: nil
-        )
-        let live = WindsurfPageSnapshot(
-            dailyUsagePercent: 2,
-            weeklyUsagePercent: 20,
-            dailyResetTime: nil,
-            weeklyResetTime: nil,
-            extraUsageBalance: "$1371.44",
-            planEndDate: nil
-        )
-
-        let selected = WindsurfSnapshotResolver.resolve(
-            cached: cached,
-            live: live,
-            preferLive: true
-        )
-
-        XCTAssertEqual(selected?.dailyUsagePercent, 2)
-        XCTAssertEqual(selected?.weeklyUsagePercent, 20)
-    }
-
-    func testResolverUsesLiveSnapshotWhenItHasAlreadyBeenFetched() {
-        let cached = WindsurfPageSnapshot(
-            dailyUsagePercent: 1,
-            weeklyUsagePercent: 19,
-            dailyResetTime: nil,
-            weeklyResetTime: nil,
-            extraUsageBalance: "$1371.44",
-            planEndDate: nil
-        )
-        let live = WindsurfPageSnapshot(
-            dailyUsagePercent: 2,
-            weeklyUsagePercent: 20,
-            dailyResetTime: nil,
-            weeklyResetTime: nil,
-            extraUsageBalance: "$1371.44",
-            planEndDate: nil
-        )
-
-        let selected = WindsurfSnapshotResolver.resolve(
-            cached: cached,
-            live: live,
-            preferLive: false
-        )
-
-        XCTAssertEqual(selected?.dailyUsagePercent, 2)
-        XCTAssertEqual(selected?.weeklyUsagePercent, 20)
-    }
-
-    func testFetchUsageSkipsCookieAndLiveScrapeDuringAutomaticRefresh() async throws {
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let dbURL = tempDirectory
-            .appendingPathComponent("Library/Application Support/Windsurf/User/globalStorage", isDirectory: true)
-            .appendingPathComponent("state.vscdb")
-        try FileManager.default.createDirectory(at: dbURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDirectory) }
-
-        try createWindsurfStateDatabase(
-            at: dbURL,
-            entries: [
-                (
-                    "windsurfAuthStatus",
-                    #"{"apiKey":"sk-ws-test","allowedCommandModelConfigsProtoBinaryBase64":[],"userStatusProtoBinaryBase64":""}"#
-                ),
-                (
-                    "codeium.windsurf",
-                    #"{"windsurf.state.cachedUsageSnapshot":{"dailyUsagePercent":12,"weeklyUsagePercent":34,"dailyResetTime":"2026-03-29T08:00:00Z","weeklyResetTime":"2026-03-30T09:15:00Z","extraUsageBalance":"$12.34"}}"#
-                )
-            ]
-        )
-
-        let cookieReadCount = MutableCounter()
-        let liveFetchCount = MutableCounter()
-        let liveSnapshot = WindsurfPageSnapshot(
-            dailyUsagePercent: 2,
-            weeklyUsagePercent: 20,
-            dailyResetTime: nil,
-            weeklyResetTime: nil,
-            extraUsageBalance: "$99.99",
-            planEndDate: nil
-        )
-
-        let usage = try await WindsurfUsageService(
-            stateDBPath: dbURL.path,
-            cookieStateProvider: {
-                cookieReadCount.value += 1
-                return WindsurfCookieState(cookies: [makeAuthCookie()], hasLikelyAuthCookies: true)
-            },
-            liveSnapshotProvider: { _, _ in
-                liveFetchCount.value += 1
-                return liveSnapshot
-            }
-        ).fetchUsage(preferLiveRefresh: false)
-
-        XCTAssertEqual(cookieReadCount.value, 0)
-        XCTAssertEqual(liveFetchCount.value, 0)
-        XCTAssertEqual(usage.primaryWindow?.remainingPercent, 88)
-        XCTAssertEqual(usage.secondaryWindow?.remainingPercent, 65)
-        XCTAssertTrue(usage.footerLines.contains("$12.34"))
-    }
-
-    func testFetchUsageUsesLiveScrapeOnlyWhenExplicitlyRequested() async throws {
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let dbURL = tempDirectory
-            .appendingPathComponent("Library/Application Support/Windsurf/User/globalStorage", isDirectory: true)
-            .appendingPathComponent("state.vscdb")
-        try FileManager.default.createDirectory(at: dbURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDirectory) }
-
-        try createWindsurfStateDatabase(
-            at: dbURL,
-            entries: [
-                (
-                    "windsurfAuthStatus",
-                    #"{"apiKey":"sk-ws-test","allowedCommandModelConfigsProtoBinaryBase64":[],"userStatusProtoBinaryBase64":""}"#
-                ),
-                (
-                    "codeium.windsurf",
-                    #"{"windsurf.state.cachedUsageSnapshot":{"dailyUsagePercent":12,"weeklyUsagePercent":34,"dailyResetTime":"2026-03-29T08:00:00Z","weeklyResetTime":"2026-03-30T09:15:00Z","extraUsageBalance":"$12.34"}}"#
-                )
-            ]
-        )
-
-        let cookieReadCount = MutableCounter()
-        let liveFetchCount = MutableCounter()
-        let liveSnapshot = WindsurfPageSnapshot(
-            dailyUsagePercent: 2,
-            weeklyUsagePercent: 20,
-            dailyResetTime: nil,
-            weeklyResetTime: nil,
-            extraUsageBalance: "$99.99",
-            planEndDate: nil
-        )
-
-        let usage = try await WindsurfUsageService(
-            stateDBPath: dbURL.path,
-            cookieStateProvider: {
-                cookieReadCount.value += 1
-                return WindsurfCookieState(cookies: [makeAuthCookie()], hasLikelyAuthCookies: true)
-            },
-            liveSnapshotProvider: { _, _ in
-                liveFetchCount.value += 1
-                return liveSnapshot
-            }
-        ).fetchUsage(preferLiveRefresh: true)
-
-        XCTAssertEqual(cookieReadCount.value, 1)
-        XCTAssertEqual(liveFetchCount.value, 1)
-        XCTAssertEqual(usage.primaryWindow?.remainingPercent, 98)
-        XCTAssertEqual(usage.secondaryWindow?.remainingPercent, 80)
-        XCTAssertTrue(usage.footerLines.contains("$99.99"))
-    }
-
-    func testAutomaticRefreshDoesNotShowStaleLiveQuotaWarningWhenUsingOnlyCachedSnapshot() async throws {
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let dbURL = tempDirectory
-            .appendingPathComponent("Library/Application Support/Windsurf/User/globalStorage", isDirectory: true)
-            .appendingPathComponent("state.vscdb")
-        try FileManager.default.createDirectory(at: dbURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDirectory) }
-
-        try createWindsurfStateDatabase(
-            at: dbURL,
-            entries: [
-                (
-                    "windsurfAuthStatus",
-                    #"{"apiKey":"sk-ws-test","allowedCommandModelConfigsProtoBinaryBase64":[],"userStatusProtoBinaryBase64":""}"#
-                ),
-                (
-                    "codeium.windsurf",
-                    #"{"windsurf.state.cachedUsageSnapshot":{"dailyUsagePercent":0,"weeklyUsagePercent":0,"dailyResetTime":"2026-03-29T08:00:00Z","weeklyResetTime":"2026-03-30T09:15:00Z","extraUsageBalance":"$12.34"}}"#
-                )
-            ]
-        )
-
-        let usage = try await WindsurfUsageService(stateDBPath: dbURL.path)
-            .fetchUsage(preferLiveRefresh: false)
-
-        XCTAssertNil(usage.error)
-        XCTAssertEqual(usage.primaryWindow?.remainingPercent, 100)
-        XCTAssertEqual(usage.secondaryWindow?.remainingPercent, 100)
-        XCTAssertTrue(usage.footerLines.contains("$12.34"))
-    }
-
     func testUserStatusProtoParserExtractsQuotaAndBalanceFromNestedMessage() throws {
         let quotaMessage =
             protoMessageField(2, protoVarintField(1, 1_774_182_339)) +
@@ -335,7 +141,11 @@ final class WindsurfUsageTests: XCTestCase {
 
         let usage = snapshot.toServiceUsage(lastUpdated: Date(timeIntervalSince1970: 1_774_600_000))
 
-        XCTAssertEqual(usage.shortLabel, "W")
+        // Part D: the user-facing label follows the rebrand while the persisted id does not,
+        // so a cached snapshot written by an earlier build still loads.
+        XCTAssertEqual(usage.shortLabel, "D")
+        XCTAssertEqual(usage.displayName, "Devin")
+        XCTAssertEqual(usage.id, "windsurf")
         XCTAssertEqual(usage.primaryWindow?.compactLabel, "d")
         XCTAssertEqual(usage.secondaryWindow?.compactLabel, "w")
         XCTAssertEqual(usage.primaryWindow?.remainingPercent, 99)
@@ -357,101 +167,6 @@ final class WindsurfUsageTests: XCTestCase {
 
         XCTAssertEqual(usage.primaryWindow?.remainingPercent, 90)
         XCTAssertEqual(usage.secondaryWindow?.remainingPercent, 95)
-    }
-
-    func testWindsurfQuotaDiagnosticsHidesSuspiciousAllGreenLocalQuotaWithoutLiveAuth() {
-        let snapshot = WindsurfPageSnapshot(
-            dailyUsagePercent: 0,
-            weeklyUsagePercent: 0,
-            dailyResetTime: nil,
-            weeklyResetTime: nil,
-            extraUsageBalance: "$1052.16",
-            planEndDate: nil
-        )
-
-        XCTAssertTrue(
-            WindsurfQuotaDiagnostics.shouldHideSuspiciousLocalQuota(
-                snapshot: snapshot,
-                hasLikelyLiveAuthCookies: false
-            )
-        )
-        XCTAssertFalse(
-            WindsurfQuotaDiagnostics.shouldHideSuspiciousLocalQuota(
-                snapshot: snapshot,
-                hasLikelyLiveAuthCookies: true
-            )
-        )
-    }
-
-    func testUsagePageParserExtractsQuotaAndBalanceFromText() throws {
-        let pageText = """
-        Plan
-        Quota resets daily/weekly
-        Plan ends in 25 days (Mar 22, - Apr 22, 2026)
-        Daily quota usage:
-        1%
-        Resets Mar 29, 11:00 AM GMT+3
-        Weekly quota usage:
-        19%
-        Resets Mar 29, 11:00 AM GMT+3
-        Extra usage balance:
-        $1371.44
-        """
-
-        let parser = WindsurfUsagePageParser(now: Date(timeIntervalSince1970: 1_774_600_000))
-        let snapshot = try parser.parse(pageText: pageText)
-
-        XCTAssertEqual(snapshot.dailyUsagePercent, 1)
-        XCTAssertEqual(snapshot.weeklyUsagePercent, 19)
-        XCTAssertEqual(snapshot.extraUsageBalance, "$1371.44")
-        XCTAssertNotNil(snapshot.dailyResetTime)
-        XCTAssertNotNil(snapshot.weeklyResetTime)
-        XCTAssertNotNil(snapshot.planEndDate)
-    }
-
-    func testUsagePageParserRollsResetIntoNextYearWhenNeeded() throws {
-        let pageText = """
-        Daily quota usage:
-        1%
-        Resets Jan 1, 1:00 AM GMT+3
-        Weekly quota usage:
-        19%
-        Resets Jan 1, 1:00 AM GMT+3
-        Extra usage balance:
-        $1371.44
-        """
-
-        let now = iso8601Date("2025-12-31T22:00:00Z")
-        let parser = WindsurfUsagePageParser(now: now)
-        let snapshot = try parser.parse(pageText: pageText)
-
-        XCTAssertEqual(
-            iso8601String(try XCTUnwrap(snapshot.dailyResetTime)),
-            "2025-12-31T22:00:00Z"
-        )
-        XCTAssertEqual(
-            iso8601String(try XCTUnwrap(snapshot.weeklyResetTime)),
-            "2025-12-31T22:00:00Z"
-        )
-    }
-
-    func testUsagePageParserKeepsWeeklyResetWhenExtraBalanceSectionIsMissing() throws {
-        let pageText = """
-        Daily quota usage:
-        1%
-        Resets Mar 29, 11:00 AM GMT+3
-        Weekly quota usage:
-        19%
-        Resets Mar 30, 9:30 AM GMT+3
-        """
-
-        let parser = WindsurfUsagePageParser(now: Date(timeIntervalSince1970: 1_774_600_000))
-        let snapshot = try parser.parse(pageText: pageText)
-
-        XCTAssertEqual(
-            iso8601String(try XCTUnwrap(snapshot.weeklyResetTime)),
-            "2026-03-30T06:30:00Z"
-        )
     }
 
     func testFetchUsageParsesResetTimesFromCachedJSONSnapshot() async throws {
@@ -477,7 +192,11 @@ final class WindsurfUsageTests: XCTestCase {
             ]
         )
 
-        let usage = try await WindsurfUsageService(stateDBPath: dbURL.path).fetchUsage()
+        let service = WindsurfUsageService(
+            stateDBLocator: { dbURL.path },
+            now: { Date(timeIntervalSince1970: 1_774_771_200) } // 2026-03-29T08:00:00Z
+        )
+        let usage = try await service.fetchUsage()
 
         XCTAssertEqual(iso8601String(try XCTUnwrap(usage.primaryWindow?.resetTime)), "2026-03-29T08:00:00Z")
         XCTAssertEqual(iso8601String(try XCTUnwrap(usage.secondaryWindow?.resetTime)), "2026-03-30T09:15:00Z")
@@ -485,9 +204,9 @@ final class WindsurfUsageTests: XCTestCase {
 
     func testUnavailableWindsurfUsageDoesNotExposeStaleFooterLines() {
         let usage = ServiceUsage(
-            id: "windsurf",
-            displayName: "Windsurf",
-            shortLabel: "W",
+            id: WindsurfUsageService.serviceID,
+            displayName: WindsurfUsageService.displayName,
+            shortLabel: WindsurfUsageService.shortLabel,
             windows: [],
             lastUpdated: .distantPast,
             error: "Windsurf: daily/weekly quota unavailable",
@@ -497,25 +216,6 @@ final class WindsurfUsageTests: XCTestCase {
         XCTAssertEqual(usage.footerLines, [])
     }
 
-    func testChromiumCookieCryptoDecryptsVersion24CookiePayload() throws {
-        let hostKey = ".windsurf.com"
-        let plaintextValue = "session-token"
-        let encryptedValue = try chromiumEncryptedCookieValue(
-            hostKey: hostKey,
-            value: plaintextValue,
-            safeStorageKey: "test-safe-storage-key"
-        )
-
-        let decrypted = try XCTUnwrap(
-            WindsurfChromiumCookieCrypto.decryptCookieValue(
-                encryptedValue,
-                hostKey: hostKey,
-                safeStorageKey: "test-safe-storage-key"
-            )
-        )
-
-        XCTAssertEqual(decrypted, plaintextValue)
-    }
 }
 
 private func protoVarintField(_ number: Int, _ value: UInt64) -> [UInt8] {
@@ -526,21 +226,6 @@ private func protoMessageField(_ number: Int, _ payload: [UInt8]) -> [UInt8] {
     encodeVarint(UInt64((number << 3) | 2)) + encodeVarint(UInt64(payload.count)) + payload
 }
 
-private func encodeVarint(_ value: UInt64) -> [UInt8] {
-    var remaining = value
-    var bytes: [UInt8] = []
-
-    repeat {
-        var byte = UInt8(remaining & 0x7f)
-        remaining >>= 7
-        if remaining != 0 {
-            byte |= 0x80
-        }
-        bytes.append(byte)
-    } while remaining != 0
-
-    return bytes
-}
 
 private func iso8601Date(_ value: String) -> Date {
     ISO8601DateFormatter().date(from: value)!
@@ -548,103 +233,6 @@ private func iso8601Date(_ value: String) -> Date {
 
 private func iso8601String(_ value: Date) -> String {
     ISO8601DateFormatter().string(from: value)
-}
-
-private func chromiumEncryptedCookieValue(hostKey: String, value: String, safeStorageKey: String) throws -> Data {
-    let digest = sha256(Data(hostKey.utf8))
-    let plaintext = digest + Data(value.utf8)
-    let key = try chromiumCookieKey(from: safeStorageKey)
-    let iv = Data(repeating: 0x20, count: kCCBlockSizeAES128)
-    let encrypted = try aes128CBCEncrypt(plaintext, key: key, iv: iv)
-    return Data("v10".utf8) + encrypted
-}
-
-private func makeAuthCookie() -> HTTPCookie {
-    HTTPCookie(properties: [
-        .domain: ".windsurf.com",
-        .path: "/",
-        .name: "sessionid",
-        .value: "token",
-        .secure: "TRUE"
-    ])!
-}
-
-private final class MutableCounter: @unchecked Sendable {
-    var value = 0
-}
-
-private func chromiumCookieKey(from safeStorageKey: String) throws -> Data {
-    let password = Data(safeStorageKey.utf8)
-    let salt = Data("saltysalt".utf8)
-    var derived = Data(count: kCCKeySizeAES128)
-    let derivedCount = derived.count
-
-    let status = derived.withUnsafeMutableBytes { derivedBytes in
-        password.withUnsafeBytes { passwordBytes in
-            salt.withUnsafeBytes { saltBytes in
-                CCKeyDerivationPBKDF(
-                    CCPBKDFAlgorithm(kCCPBKDF2),
-                    passwordBytes.bindMemory(to: Int8.self).baseAddress,
-                    password.count,
-                    saltBytes.bindMemory(to: UInt8.self).baseAddress,
-                    salt.count,
-                    CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1),
-                    1003,
-                    derivedBytes.bindMemory(to: UInt8.self).baseAddress,
-                    derivedCount
-                )
-            }
-        }
-    }
-
-    guard status == kCCSuccess else {
-        throw NSError(domain: "WindsurfUsageTests", code: Int(status))
-    }
-
-    return derived
-}
-
-private func aes128CBCEncrypt(_ plaintext: Data, key: Data, iv: Data) throws -> Data {
-    var cryptData = Data(count: plaintext.count + kCCBlockSizeAES128)
-    var outLength = 0
-    let cryptDataCount = cryptData.count
-
-    let status = cryptData.withUnsafeMutableBytes { cryptBytes in
-        plaintext.withUnsafeBytes { plaintextBytes in
-            key.withUnsafeBytes { keyBytes in
-                iv.withUnsafeBytes { ivBytes in
-                    CCCrypt(
-                        CCOperation(kCCEncrypt),
-                        CCAlgorithm(kCCAlgorithmAES),
-                        CCOptions(kCCOptionPKCS7Padding),
-                        keyBytes.baseAddress,
-                        key.count,
-                        ivBytes.baseAddress,
-                        plaintextBytes.baseAddress,
-                        plaintext.count,
-                        cryptBytes.baseAddress,
-                        cryptDataCount,
-                        &outLength
-                    )
-                }
-            }
-        }
-    }
-
-    guard status == kCCSuccess else {
-        throw NSError(domain: "WindsurfUsageTests", code: Int(status))
-    }
-
-    cryptData.removeSubrange(outLength..<cryptData.count)
-    return cryptData
-}
-
-private func sha256(_ data: Data) -> Data {
-    var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-    data.withUnsafeBytes { bytes in
-        _ = CC_SHA256(bytes.baseAddress, CC_LONG(data.count), &digest)
-    }
-    return Data(digest)
 }
 
 private func createWindsurfStateDatabase(at url: URL, entries: [(String, String)]) throws {
@@ -675,4 +263,20 @@ private func createWindsurfStateDatabase(at url: URL, entries: [(String, String)
             throw NSError(domain: "WindsurfUsageTests", code: 4)
         }
     }
+}
+
+private func encodeVarint(_ value: UInt64) -> [UInt8] {
+    var remaining = value
+    var bytes: [UInt8] = []
+
+    repeat {
+        var byte = UInt8(remaining & 0x7f)
+        remaining >>= 7
+        if remaining != 0 {
+            byte |= 0x80
+        }
+        bytes.append(byte)
+    } while remaining != 0
+
+    return bytes
 }

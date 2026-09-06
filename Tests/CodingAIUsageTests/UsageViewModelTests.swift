@@ -251,7 +251,7 @@ final class UsageViewModelTests: XCTestCase {
         _ = try? loader.loadAnyCredentials()
         XCTAssertEqual(loader.cacheState.cachedAccessToken, "file-token")
 
-        await viewModel.performManualRefresh(forceLiveWindsurf: false)
+        await viewModel.performManualRefresh()
 
         XCTAssertEqual(invalidationCount, 0)
     }
@@ -280,7 +280,7 @@ final class UsageViewModelTests: XCTestCase {
         viewModel.showCodex = false
         viewModel.showWindsurf = false
 
-        await viewModel.performManualRefresh(forceLiveWindsurf: false)
+        await viewModel.performManualRefresh()
 
         // In-memory state surfaces the error for display
         XCTAssertEqual(viewModel.claudeUsage?.error, "Claude Code: unexpected API response format")
@@ -313,7 +313,7 @@ final class UsageViewModelTests: XCTestCase {
         viewModel.showCodex = true
         viewModel.showWindsurf = false
 
-        await viewModel.performManualRefresh(forceLiveWindsurf: false)
+        await viewModel.performManualRefresh()
 
         // In-memory state surfaces the error for display
         XCTAssertEqual(viewModel.codexUsage?.error, "Codex: unexpected API response format")
@@ -381,9 +381,9 @@ final class UsageViewModelTests: XCTestCase {
         XCTAssertEqual(initialCodexCounts.fetchUsageCallCount, 0)
         XCTAssertEqual(initialWindsurfCounts.checkInstalledCallCount, 0)
         XCTAssertEqual(initialWindsurfCounts.isLoggedInCallCount, 0)
-        XCTAssertTrue(initialWindsurfCounts.fetchUsageArguments.isEmpty)
+        XCTAssertEqual(initialWindsurfCounts.fetchUsageCallCount, 0)
 
-        await viewModel.performManualRefresh(forceLiveWindsurf: false)
+        await viewModel.performManualRefresh()
 
         let finalClaudeCounts = await claudeService.snapshot()
         let finalCodexCounts = await codexService.snapshot()
@@ -394,7 +394,7 @@ final class UsageViewModelTests: XCTestCase {
         XCTAssertGreaterThan(finalCodexCounts.checkInstalledCallCount, 0)
         XCTAssertGreaterThan(finalCodexCounts.fetchUsageCallCount, 0)
         XCTAssertGreaterThan(finalWindsurfCounts.checkInstalledCallCount, 0)
-        XCTAssertEqual(finalWindsurfCounts.fetchUsageArguments, [false])
+        XCTAssertEqual(finalWindsurfCounts.fetchUsageCallCount, 1)
     }
 
     func testManualRefreshButtonForcesLiveWindsurf() async throws {
@@ -447,7 +447,7 @@ final class UsageViewModelTests: XCTestCase {
         let finalWindsurfCounts = await windsurfService.snapshot()
 
         XCTAssertEqual(finalClaudeCounts.invalidateCredentialCacheCallCount, 0)
-        XCTAssertEqual(finalWindsurfCounts.fetchUsageArguments, [true])
+        XCTAssertEqual(finalWindsurfCounts.fetchUsageCallCount, 1)
     }
 
     func testMenuOpenRefreshFetchesOnceAndThrottlesImmediateReopen() async throws {
@@ -508,7 +508,7 @@ final class UsageViewModelTests: XCTestCase {
 
         XCTAssertEqual(claudeCounts.fetchUsageCallCount, 1)
         // Menu-open refreshes must not force the live Windsurf scrape.
-        XCTAssertEqual(windsurfCounts.fetchUsageArguments, [false])
+        XCTAssertEqual(windsurfCounts.fetchUsageCallCount, 1)
         XCTAssertNotNil(viewModel.lastRefreshCompleted)
         XCTAssertNil(viewModel.rateLimitedUntil)
     }
@@ -579,7 +579,7 @@ final class UsageViewModelTests: XCTestCase {
 
         XCTAssertEqual(claudeCounts.fetchUsageCallCount, 0)
         XCTAssertEqual(codexCounts.fetchUsageCallCount, 1)
-        XCTAssertEqual(windsurfCounts.fetchUsageArguments, [false])
+        XCTAssertEqual(windsurfCounts.fetchUsageCallCount, 1)
         XCTAssertEqual(viewModel.claudeUsage?.fiveHourWindow?.remainingPercent, 80)
     }
 
@@ -620,7 +620,7 @@ final class UsageViewModelTests: XCTestCase {
         viewModel.showCodex = false
         viewModel.showWindsurf = false
 
-        await viewModel.performManualRefresh(forceLiveWindsurf: false)
+        await viewModel.performManualRefresh()
 
         let claudeCounts = await claudeService.snapshot()
 
@@ -921,20 +921,20 @@ private actor WindsurfUsageSpy: WindsurfUsageServing {
     struct Snapshot {
         let checkInstalledCallCount: Int
         let isLoggedInCallCount: Int
-        let fetchUsageArguments: [Bool]
+        let fetchUsageCallCount: Int
     }
 
     private let usage: ServiceUsage
     private(set) var checkInstalledCallCount = 0
     private(set) var isLoggedInCallCount = 0
-    private(set) var fetchUsageArguments: [Bool] = []
+    private(set) var fetchUsageCallCount = 0
 
     init(usage: ServiceUsage) {
         self.usage = usage
     }
 
-    func fetchUsage(preferLiveRefresh: Bool) async throws -> ServiceUsage {
-        fetchUsageArguments.append(preferLiveRefresh)
+    func fetchUsage() async throws -> ServiceUsage {
+        fetchUsageCallCount += 1
         return usage
     }
 
@@ -952,7 +952,7 @@ private actor WindsurfUsageSpy: WindsurfUsageServing {
         Snapshot(
             checkInstalledCallCount: checkInstalledCallCount,
             isLoggedInCallCount: isLoggedInCallCount,
-            fetchUsageArguments: fetchUsageArguments
+            fetchUsageCallCount: fetchUsageCallCount
         )
     }
 }

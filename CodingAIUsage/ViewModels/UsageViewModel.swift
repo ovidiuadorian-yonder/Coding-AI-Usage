@@ -100,7 +100,6 @@ final class UsageViewModel: ObservableObject {
     }
 
     func refresh(
-        forceLiveWindsurf: Bool = true,
         userInitiated: Bool = false,
         allowProviderCache: Bool = false
     ) async {
@@ -125,7 +124,7 @@ final class UsageViewModel: ObservableObject {
 
         async let claudeResult: RefreshResult = fetchClaude(allowCachedSnapshot: allowProviderCache)
         async let codexResult: RefreshResult = fetchCodex()
-        async let windsurfResult: RefreshResult = fetchWindsurf(preferLiveRefresh: forceLiveWindsurf)
+        async let windsurfResult: RefreshResult = fetchWindsurf()
         let results = await [claudeResult, codexResult, windsurfResult]
 
         lastRefreshCompleted = Date()
@@ -135,17 +134,13 @@ final class UsageViewModel: ObservableObject {
 
     func manualRefresh() {
         Task { @MainActor in
-            await performManualRefresh(forceLiveWindsurf: true)
+            await performManualRefresh()
         }
     }
 
-    func performManualRefresh(forceLiveWindsurf: Bool) async {
+    func performManualRefresh() async {
         lastPrerequisitesCheck = nil
-        await refresh(
-            forceLiveWindsurf: forceLiveWindsurf,
-            userInitiated: true,
-            allowProviderCache: false
-        )
+        await refresh(userInitiated: true, allowProviderCache: false)
     }
 
     /// Called when the menu bar window opens. Refreshes at most once per
@@ -163,7 +158,7 @@ final class UsageViewModel: ObservableObject {
                 now: Date()
             ) else { return }
 
-            await refresh(forceLiveWindsurf: false, userInitiated: true, allowProviderCache: true)
+            await refresh(userInitiated: true, allowProviderCache: true)
         }
     }
 
@@ -512,7 +507,7 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
-    private func fetchWindsurf(preferLiveRefresh: Bool = false) async -> RefreshResult {
+    private func fetchWindsurf() async -> RefreshResult {
         guard showWindsurf else {
             windsurfUsage = nil
             return .skipped
@@ -520,7 +515,7 @@ final class UsageViewModel: ObservableObject {
         guard windsurfInstalled, windsurfLoggedIn else { return .skipped }
 
         do {
-            let usage = try await windsurfService.fetchUsage(preferLiveRefresh: preferLiveRefresh)
+            let usage = try await windsurfService.fetchUsage()
             windsurfUsage = usage
             cacheStore.save(usage)
             if let error = usage.error {

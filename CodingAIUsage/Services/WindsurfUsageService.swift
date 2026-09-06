@@ -1,110 +1,119 @@
 import Foundation
 import SQLite3
-import Security
-import WebKit
-import CommonCrypto
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 protocol WindsurfUsageServing: Sendable {
-    func fetchUsage(preferLiveRefresh: Bool) async throws -> ServiceUsage
+    func fetchUsage() async throws -> ServiceUsage
     func checkInstalled() async -> Bool
     func isLoggedIn() async -> Bool
 }
 
 actor WindsurfUsageService: WindsurfUsageServing {
-    typealias CookieStateProvider = @Sendable () throws -> WindsurfCookieState
-    typealias LiveSnapshotProvider = @Sendable (_ planInfo: WindsurfCachedPlanInfo?, _ cookies: [HTTPCookie]) async throws -> WindsurfPageSnapshot?
+    /// Resolves the state database to read, or nil when no supported client is installed.
+    typealias StateDBLocator = @Sendable () -> String?
 
-    private let stateDBPath: String
-    private let usageURL: URL
-    private let cookieStateProvider: CookieStateProvider
-    private let liveSnapshotProvider: LiveSnapshotProvider
+    /// Windsurf was rebranded to Devin. The client is the same VS Code fork — the bundle id is
+    /// still `com.exafunction.windsurf` and the state keys are unchanged — so only the label and
+    /// the directory move.
+    ///
+    /// `serviceID` deliberately stays `"windsurf"`: it keys the persisted usage snapshot and the
+    /// `showWindsurf` visibility preference, so renaming it would discard the user's cached data
+    /// and reset their settings on upgrade. Internal identifier and user-facing label are
+    /// decoupled on purpose.
+    static let serviceID = "windsurf"
+    static let displayName = "Devin"
+    static let shortLabel = "D"
+
+    /// Application-support directories to probe, in tie-break order.
+    static let clientSupportDirectories = ["Devin", "Windsurf"]
+
+    private let stateDBLocator: StateDBLocator
+    private let now: @Sendable () -> Date
 
     init(
-        stateDBPath: String = NSHomeDirectory() + "/Library/Application Support/Windsurf/User/globalStorage/state.vscdb",
-        usageURL: URL = URL(string: "https://windsurf.com/subscription/usage")!,
-        cookieStateProvider: CookieStateProvider? = nil,
-        liveSnapshotProvider: LiveSnapshotProvider? = nil
+        stateDBLocator: @escaping StateDBLocator = {
+            WindsurfUsageService.defaultStateDBLocator()
+        },
+        now: @escaping @Sendable () -> Date = Date.init
     ) {
-        self.stateDBPath = stateDBPath
-        self.usageURL = usageURL
-        self.cookieStateProvider = cookieStateProvider ?? { [stateDBPath] in
-            try WindsurfUsageService.readCookies(stateDBPath: stateDBPath)
-        }
-        self.liveSnapshotProvider = liveSnapshotProvider ?? { [usageURL] planInfo, cookies in
-            try await WindsurfUsageService.scrapeSnapshot(
-                usageURL: usageURL,
-                planInfo: planInfo,
-                cookies: cookies
-            )
-        }
+        self.stateDBLocator = stateDBLocator
+        self.now = now
     }
 
-    func fetchUsage(preferLiveRefresh: Bool = false) async throws -> ServiceUsage {
+    /// Picks the state database with the newest modification time across every supported client
+    /// directory, so the app follows the client actually in use.
+    ///
+    /// Freshness rather than a fixed Devin-first priority: it is correct in both directions — a
+    /// user who has not migrated keeps working, and one who rolls back is not pinned to a stale
+    /// Devin database. Ties resolve to Devin by the ordering of `clientSupportDirectories`.
+    static func defaultStateDBLocator(homeDirectory: String = NSHomeDirectory()) -> String? {
+        let fileManager = FileManager.default
+        let candidates: [(path: String, modified: Date)] = clientSupportDirectories.compactMap { directory in
+            let path = homeDirectory
+                + "/Library/Application Support/\(directory)/User/globalStorage/state.vscdb"
+            guard let attributes = try? fileManager.attributesOfItem(atPath: path),
+                  let modified = attributes[.modificationDate] as? Date else {
+                return nil
+            }
+            return (path, modified)
+        }
+
+        return candidates.max { lhs, rhs in
+            // `max(by:)` keeps the later element when the comparator reports "not greater", so a
+            // strict `<` preserves the earlier candidate on a tie — Devin, given the array order.
+            lhs.modified < rhs.modified
+        }?.path
+    }
+
+    func fetchUsage() async throws -> ServiceUsage {
         guard let authStatus = try readAuthStatus(), !authStatus.apiKey.isEmpty else {
-            throw UsageError.noCredentials("Windsurf: not logged in")
+            throw UsageError.noCredentials("\(Self.displayName): not logged in")
         }
 
         let planInfo = try readCachedPlanInfo()
-        let lastUpdated = Date()
+        let lastUpdated = now()
 
-        let persistedSnapshot = try
+        let snapshot = try
             readStructuredSnapshot(authStatus: authStatus, planInfo: planInfo) ??
             planInfo?.quotaSnapshot
 
-        let cookieState: WindsurfCookieState
-        let liveSnapshot: WindsurfPageSnapshot?
-        if preferLiveRefresh {
-            cookieState = try cookieStateProvider()
-            if cookieState.hasLikelyAuthCookies {
-                liveSnapshot = try? await liveSnapshotProvider(planInfo, cookieState.cookies)
-            } else {
-                liveSnapshot = nil
-            }
-        } else {
-            cookieState = WindsurfCookieState(cookies: [], hasLikelyAuthCookies: false)
-            liveSnapshot = nil
+        guard let snapshot, isFresh(planEnd: snapshot.planEndDate) else {
+            return ServiceUsage(
+                id: Self.serviceID,
+                displayName: Self.displayName,
+                shortLabel: Self.shortLabel,
+                windows: [],
+                lastUpdated: lastUpdated,
+                error: "\(Self.displayName): daily/weekly quota unavailable",
+                footerLines: []
+            )
         }
 
-        if let snapshot = WindsurfSnapshotResolver.resolve(
-            cached: persistedSnapshot,
-            live: liveSnapshot,
-            preferLive: preferLiveRefresh
-        ) {
-            if preferLiveRefresh && WindsurfQuotaDiagnostics.shouldHideSuspiciousLocalQuota(
-                snapshot: snapshot,
-                hasLikelyLiveAuthCookies: cookieState.hasLikelyAuthCookies
-            ) {
-                return ServiceUsage(
-                    id: "windsurf",
-                    displayName: "Windsurf",
-                    shortLabel: "W",
-                    windows: [],
-                    lastUpdated: lastUpdated,
-                    error: "Windsurf: live quota unavailable; local cache may be stale",
-                    footerLines: snapshot.footerLines
-                )
-            }
+        return snapshot.toServiceUsage(lastUpdated: lastUpdated)
+    }
 
-            return snapshot.toServiceUsage(lastUpdated: lastUpdated)
-        }
-
-        return ServiceUsage(
-            id: "windsurf",
-            displayName: "Windsurf",
-            shortLabel: "W",
-            windows: [],
-            lastUpdated: lastUpdated,
-            error: "Windsurf: daily/weekly quota unavailable",
-            footerLines: []
-        )
+    /// A source is stale when its own billing period has already ended.
+    ///
+    /// Reset timestamps are deliberately not consulted. The proto stores the reset from the
+    /// client's last quota sync rather than the next one, so a perfectly current source routinely
+    /// carries elapsed daily and weekly resets; treating those as staleness would discard live
+    /// data. A source carrying no plan end cannot be judged and is retained — the gate demotes
+    /// sources proven stale, it does not demand proof of freshness.
+    private func isFresh(planEnd: Date?) -> Bool {
+        guard let planEnd else { return true }
+        return planEnd > now()
     }
 
     func checkInstalled() async -> Bool {
-        let appPath = "/Applications/Windsurf.app"
-        let supportPath = NSHomeDirectory() + "/Library/Application Support/Windsurf"
-        return FileManager.default.fileExists(atPath: appPath) || FileManager.default.fileExists(atPath: supportPath)
+        if stateDBLocator() != nil {
+            return true
+        }
+        let fileManager = FileManager.default
+        return Self.clientSupportDirectories.contains { directory in
+            fileManager.fileExists(atPath: "/Applications/\(directory).app")
+                || fileManager.fileExists(atPath: NSHomeDirectory() + "/Library/Application Support/\(directory)")
+        }
     }
 
     func isLoggedIn() async -> Bool {
@@ -125,7 +134,15 @@ actor WindsurfUsageService: WindsurfUsageServing {
         guard let value = try readStateValue(forKey: "windsurf.settings.cachedPlanInfo") else {
             return nil
         }
-        return try JSONDecoder().decode(WindsurfCachedPlanInfo.self, from: Data(value.utf8))
+        let planInfo = try JSONDecoder().decode(WindsurfCachedPlanInfo.self, from: Data(value.utf8))
+
+        // Freshness gate. This key is no longer written by the current client: it survives a
+        // Windsurf-to-Devin migration verbatim and keeps parsing cleanly while being months out of
+        // date, so an ungated read blends a dead billing period into today's numbers.
+        guard isFresh(planEnd: planInfo.endDate) else {
+            return nil
+        }
+        return planInfo
     }
 
     private func readStructuredSnapshot(authStatus: WindsurfAuthStatus, planInfo: WindsurfCachedPlanInfo?) throws -> WindsurfPageSnapshot? {
@@ -214,158 +231,12 @@ actor WindsurfUsageService: WindsurfUsageServing {
         )
     }
 
-    private static func scrapeSnapshot(
-        usageURL: URL,
-        planInfo: WindsurfCachedPlanInfo?,
-        cookies: [HTTPCookie]
-    ) async throws -> WindsurfPageSnapshot? {
-        guard !cookies.isEmpty else {
-            return nil
-        }
-
-        let scraper = await WindsurfUsageScraper(url: usageURL)
-        let pageText = try await scraper.fetchPageText(cookies: cookies)
-        let parser = WindsurfUsagePageParser(now: Date())
-        let parsed = try parser.parse(pageText: pageText)
-
-        return WindsurfPageSnapshot(
-            dailyUsagePercent: parsed.dailyUsagePercent,
-            weeklyUsagePercent: parsed.weeklyUsagePercent,
-            dailyResetTime: parsed.dailyResetTime,
-            weeklyResetTime: parsed.weeklyResetTime,
-            extraUsageBalance: parsed.extraUsageBalance,
-            planEndDate: parsed.planEndDate ?? planInfo?.endDate
-        )
-    }
-
-    private static func readCookies(stateDBPath _: String) throws -> WindsurfCookieState {
-        let cookieStores = [
-            ChromiumCookieStore(
-                path: NSHomeDirectory() + "/Library/Application Support/Windsurf/Cookies",
-                safeStorageService: "Windsurf Safe Storage",
-                safeStorageAccount: "Windsurf"
-            ),
-            ChromiumCookieStore(
-                path: NSHomeDirectory() + "/Library/Application Support/Microsoft Edge/Default/Cookies",
-                safeStorageService: "Microsoft Edge Safe Storage",
-                safeStorageAccount: "Microsoft Edge"
-            ),
-            ChromiumCookieStore(
-                path: NSHomeDirectory() + "/Library/Application Support/Google/Chrome/Default/Cookies",
-                safeStorageService: "Chrome Safe Storage",
-                safeStorageAccount: "Chrome"
-            )
-        ]
-
-        var fallbackCookies: [HTTPCookie] = []
-
-        for store in cookieStores where FileManager.default.fileExists(atPath: store.path) {
-            let cookies = try readCookies(from: store)
-            let hasLikelyAuthCookies = cookies.contains(where: Self.isLikelyAuthCookie(_:))
-
-            if hasLikelyAuthCookies {
-                return WindsurfCookieState(
-                    cookies: cookies,
-                    hasLikelyAuthCookies: true
-                )
-            }
-
-            if fallbackCookies.isEmpty, !cookies.isEmpty {
-                fallbackCookies = cookies
-            }
-        }
-
-        return WindsurfCookieState(cookies: fallbackCookies, hasLikelyAuthCookies: false)
-    }
-
-    private static func isLikelyAuthCookie(_ cookie: HTTPCookie) -> Bool {
-        let name = cookie.name.lowercased()
-        let analyticsPrefixes = ["_ga", "__stripe_", "ph_", "ajs_", "amplitude", "mp_"]
-        return !analyticsPrefixes.contains(where: { name.hasPrefix($0) })
-    }
-
-    private static func readCookies(from store: ChromiumCookieStore) throws -> [HTTPCookie] {
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(store.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
-            throw UsageError.invalidResponse
-        }
-        defer { sqlite3_close(db) }
-
-        let query = """
-        SELECT host_key, name, value, encrypted_value, path, expires_utc, is_secure, is_httponly
-        FROM cookies
-        WHERE host_key LIKE '%windsurf.com%'
-        """
-
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else {
-            throw UsageError.invalidResponse
-        }
-        defer { sqlite3_finalize(statement) }
-
-        var cookies: [HTTPCookie] = []
-        let safeStorageKey = WindsurfChromiumCookieCrypto.safeStorageKey(
-            service: store.safeStorageService,
-            account: store.safeStorageAccount
-        )
-
-        while sqlite3_step(statement) == SQLITE_ROW {
-            guard
-                let hostKey = sqliteString(statement, index: 0),
-                let name = sqliteString(statement, index: 1),
-                let path = sqliteString(statement, index: 4)
-            else {
-                continue
-            }
-
-            let value: String?
-            if let plaintextValue = sqliteString(statement, index: 2), !plaintextValue.isEmpty {
-                value = plaintextValue
-            } else if
-                let encryptedValue = sqliteData(statement, index: 3),
-                let safeStorageKey,
-                !encryptedValue.isEmpty
-            {
-                value = WindsurfChromiumCookieCrypto.decryptCookieValue(
-                    encryptedValue,
-                    hostKey: hostKey,
-                    safeStorageKey: safeStorageKey
-                )
-            } else {
-                value = nil
-            }
-
-            guard let value, !value.isEmpty else {
-                continue
-            }
-
-            var properties: [HTTPCookiePropertyKey: Any] = [
-                .domain: hostKey,
-                .name: name,
-                .value: value,
-                .path: path
-            ]
-
-            if sqlite3_column_int64(statement, 5) > 0 {
-                properties[.expires] = chromiumDate(from: sqlite3_column_int64(statement, 5))
-            }
-            if sqlite3_column_int(statement, 6) != 0 {
-                properties[.secure] = "TRUE"
-            }
-            if sqlite3_column_int(statement, 7) != 0 {
-                properties[HTTPCookiePropertyKey("HttpOnly")] = "TRUE"
-            }
-
-            if let cookie = HTTPCookie(properties: properties) {
-                cookies.append(cookie)
-            }
-        }
-
-        return cookies
-    }
 
     private func readStateValue(forKey key: String) throws -> String? {
         var db: OpaquePointer?
+        guard let stateDBPath = stateDBLocator() else {
+            return nil
+        }
         guard sqlite3_open_v2(stateDBPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
             throw UsageError.invalidResponse
         }
@@ -402,221 +273,4 @@ actor WindsurfUsageService: WindsurfUsageServing {
         return Data(bytes: bytes, count: byteCount)
     }
 
-    private static func chromiumDate(from value: Int64) -> Date {
-        let secondsSince1601 = Double(value) / 1_000_000.0
-        let secondsBetweenEpochs = 11_644_473_600.0
-        return Date(timeIntervalSince1970: secondsSince1601 - secondsBetweenEpochs)
-    }
-}
-
-private struct ChromiumCookieStore {
-    let path: String
-    let safeStorageService: String
-    let safeStorageAccount: String
-}
-
-struct WindsurfCookieState {
-    let cookies: [HTTPCookie]
-    let hasLikelyAuthCookies: Bool
-}
-
-struct WindsurfChromiumCookieCrypto {
-    private static let version10Prefix = Data("v10".utf8)
-    private static let version11Prefix = Data("v11".utf8)
-
-    static func safeStorageKey(service: String, account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else {
-            return nil
-        }
-
-        return String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    static func decryptCookieValue(_ encryptedValue: Data, hostKey: String, safeStorageKey: String) -> String? {
-        let ciphertext: Data
-        switch encryptedValue.prefix(3) {
-        case version10Prefix, version11Prefix:
-            ciphertext = encryptedValue.dropFirst(3)
-        default:
-            ciphertext = encryptedValue
-        }
-
-        guard
-            let key = deriveKey(from: safeStorageKey),
-            let decrypted = aes128CBCDecrypt(
-                ciphertext,
-                key: key,
-                iv: Data(repeating: 0x20, count: kCCBlockSizeAES128)
-            )
-        else {
-            return nil
-        }
-
-        let plaintext = stripHostDigestIfPresent(from: decrypted, hostKey: hostKey)
-        return String(data: plaintext, encoding: .utf8)
-    }
-
-    private static func deriveKey(from safeStorageKey: String) -> Data? {
-        let password = Data(safeStorageKey.utf8)
-        let salt = Data("saltysalt".utf8)
-        var derived = Data(count: kCCKeySizeAES128)
-        let derivedCount = derived.count
-
-        let status = derived.withUnsafeMutableBytes { derivedBytes in
-            password.withUnsafeBytes { passwordBytes in
-                salt.withUnsafeBytes { saltBytes in
-                    CCKeyDerivationPBKDF(
-                        CCPBKDFAlgorithm(kCCPBKDF2),
-                        passwordBytes.bindMemory(to: Int8.self).baseAddress,
-                        password.count,
-                        saltBytes.bindMemory(to: UInt8.self).baseAddress,
-                        salt.count,
-                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1),
-                        1003,
-                        derivedBytes.bindMemory(to: UInt8.self).baseAddress,
-                        derivedCount
-                    )
-                }
-            }
-        }
-
-        guard status == kCCSuccess else {
-            return nil
-        }
-
-        return derived
-    }
-
-    private static func aes128CBCDecrypt(_ ciphertext: Data, key: Data, iv: Data) -> Data? {
-        var plaintext = Data(count: ciphertext.count + kCCBlockSizeAES128)
-        var outputLength = 0
-        let plaintextCount = plaintext.count
-
-        let status = plaintext.withUnsafeMutableBytes { plaintextBytes in
-            ciphertext.withUnsafeBytes { ciphertextBytes in
-                key.withUnsafeBytes { keyBytes in
-                    iv.withUnsafeBytes { ivBytes in
-                        CCCrypt(
-                            CCOperation(kCCDecrypt),
-                            CCAlgorithm(kCCAlgorithmAES),
-                            CCOptions(kCCOptionPKCS7Padding),
-                            keyBytes.baseAddress,
-                            key.count,
-                            ivBytes.baseAddress,
-                            ciphertextBytes.baseAddress,
-                            ciphertext.count,
-                            plaintextBytes.baseAddress,
-                            plaintextCount,
-                            &outputLength
-                        )
-                    }
-                }
-            }
-        }
-
-        guard status == kCCSuccess else {
-            return nil
-        }
-
-        plaintext.removeSubrange(outputLength..<plaintext.count)
-        return plaintext
-    }
-
-    private static func stripHostDigestIfPresent(from decrypted: Data, hostKey: String) -> Data {
-        let digest = sha256(Data(hostKey.utf8))
-        guard decrypted.starts(with: digest) else {
-            return decrypted
-        }
-        return decrypted.dropFirst(digest.count)
-    }
-
-    private static func sha256(_ data: Data) -> Data {
-        var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-        data.withUnsafeBytes { bytes in
-            _ = CC_SHA256(bytes.baseAddress, CC_LONG(data.count), &digest)
-        }
-        return Data(digest)
-    }
-}
-
-@MainActor
-final class WindsurfUsageScraper: NSObject, WKNavigationDelegate {
-    private let url: URL
-    private let webView: WKWebView
-    private var continuation: CheckedContinuation<String, Error>?
-
-    init(url: URL) {
-        self.url = url
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        self.webView = WKWebView(frame: .zero, configuration: configuration)
-        super.init()
-        webView.navigationDelegate = self
-    }
-
-    func fetchPageText(cookies: [HTTPCookie]) async throws -> String {
-        for cookie in cookies {
-            await withCheckedContinuation { continuation in
-                webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
-                    continuation.resume()
-                }
-            }
-        }
-
-        return try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
-            webView.load(URLRequest(url: url))
-
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
-                guard let self, let continuation = self.continuation else { return }
-                self.continuation = nil
-                continuation.resume(throwing: UsageError.networkError("Windsurf: usage page timed out"))
-            }
-        }
-    }
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        webView.evaluateJavaScript("document.body ? document.body.innerText : ''") { [weak self] result, error in
-            guard let self, let continuation = self.continuation else { return }
-            self.continuation = nil
-
-            if let error {
-                continuation.resume(throwing: error)
-                return
-            }
-
-            let text = (result as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if text.isEmpty {
-                continuation.resume(throwing: UsageError.invalidResponse)
-            } else {
-                continuation.resume(returning: text)
-            }
-        }
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        finishWithError(error)
-    }
-
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        finishWithError(error)
-    }
-
-    private func finishWithError(_ error: Error) {
-        guard let continuation else { return }
-        self.continuation = nil
-        continuation.resume(throwing: error)
-    }
 }

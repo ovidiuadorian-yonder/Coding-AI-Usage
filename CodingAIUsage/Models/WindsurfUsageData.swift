@@ -94,9 +94,9 @@ struct WindsurfPageSnapshot: Equatable {
 
     func toServiceUsage(lastUpdated: Date) -> ServiceUsage {
         return ServiceUsage(
-            id: "windsurf",
-            displayName: "Windsurf",
-            shortLabel: "W",
+            id: WindsurfUsageService.serviceID,
+            displayName: WindsurfUsageService.displayName,
+            shortLabel: WindsurfUsageService.shortLabel,
             windows: [
                 UsageWindow(
                     id: "daily",
@@ -117,144 +117,6 @@ struct WindsurfPageSnapshot: Equatable {
             error: nil,
             footerLines: footerLines
         )
-    }
-}
-
-struct WindsurfUsagePageParser {
-    let now: Date
-
-    func parse(pageText: String) throws -> WindsurfPageSnapshot {
-        let dailyUsagePercent = try extractPercent(label: "Daily quota usage", from: pageText)
-        let weeklyUsagePercent = try extractPercent(label: "Weekly quota usage", from: pageText)
-        let extraUsageBalance = extractBalance(from: pageText)
-        let dailyResetTime = extractResetTime(sectionLabel: "Daily quota usage", nextLabel: "Weekly quota usage", from: pageText)
-        let weeklyResetTime = extractResetTime(sectionLabel: "Weekly quota usage", nextLabel: nil, from: pageText)
-        let planEndDate = extractPlanEndDate(from: pageText)
-
-        return WindsurfPageSnapshot(
-            dailyUsagePercent: dailyUsagePercent,
-            weeklyUsagePercent: weeklyUsagePercent,
-            dailyResetTime: dailyResetTime,
-            weeklyResetTime: weeklyResetTime,
-            extraUsageBalance: extraUsageBalance,
-            planEndDate: planEndDate
-        )
-    }
-
-    private func extractPercent(label: String, from text: String) throws -> Int {
-        let pattern = "\(NSRegularExpression.escapedPattern(for: label))\\s*:?\\s*(\\d{1,3})%"
-        guard let value = firstMatch(pattern: pattern, in: text, group: 1), let percent = Int(value) else {
-            throw UsageError.invalidResponse
-        }
-        return percent
-    }
-
-    private func extractBalance(from text: String) -> String? {
-        firstMatch(
-            pattern: "Extra usage balance\\s*:?\\s*(\\$[0-9,]+(?:\\.[0-9]{2})?)",
-            in: text,
-            group: 1
-        )
-    }
-
-    private func extractResetTime(sectionLabel: String, nextLabel: String?, from text: String) -> Date? {
-        let pattern: String
-        if let nextLabel {
-            pattern = "\(NSRegularExpression.escapedPattern(for: sectionLabel))(?s)(.*?)\(NSRegularExpression.escapedPattern(for: nextLabel))"
-        } else {
-            pattern = "\(NSRegularExpression.escapedPattern(for: sectionLabel))(?s)(.*)"
-        }
-        guard let section = firstMatch(pattern: pattern, in: text, group: 1) else {
-            return nil
-        }
-        guard let rawReset = firstMatch(pattern: "Resets\\s+([A-Za-z]{3}\\s+\\d{1,2},\\s+\\d{1,2}:\\d{2}\\s+[AP]M\\s+GMT[+-]\\d{1,2})", in: section, group: 1) else {
-            return nil
-        }
-        return parseResetDate(rawReset)
-    }
-
-    private func extractPlanEndDate(from text: String) -> Date? {
-        guard let rawDate = firstMatch(pattern: "Plan ends in .*?([A-Za-z]{3}\\s+\\d{1,2},\\s+\\d{4})", in: text, group: 1) else {
-            return nil
-        }
-
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "MMM d, yyyy"
-        return formatter.date(from: rawDate)
-    }
-
-    private func parseResetDate(_ rawValue: String) -> Date? {
-        let pattern = "([A-Za-z]{3})\\s+(\\d{1,2}),\\s+(\\d{1,2}):(\\d{2})\\s+([AP]M)\\s+GMT([+-]\\d{1,2})"
-        guard
-            let monthString = firstMatch(pattern: pattern, in: rawValue, group: 1),
-            let dayString = firstMatch(pattern: pattern, in: rawValue, group: 2),
-            let hourString = firstMatch(pattern: pattern, in: rawValue, group: 3),
-            let minuteString = firstMatch(pattern: pattern, in: rawValue, group: 4),
-            let meridiem = firstMatch(pattern: pattern, in: rawValue, group: 5),
-            let offsetString = firstMatch(pattern: pattern, in: rawValue, group: 6),
-            let day = Int(dayString),
-            let hour = Int(hourString),
-            let minute = Int(minuteString),
-            let offsetHours = Int(offsetString)
-        else {
-            return nil
-        }
-
-        let months = ["Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6, "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12]
-        guard let month = months[monthString] else {
-            return nil
-        }
-
-        var components = DateComponents()
-        let calendar = Calendar(identifier: .gregorian)
-        components.calendar = calendar
-        components.timeZone = TimeZone(secondsFromGMT: offsetHours * 3600)
-        components.year = calendar.component(.year, from: now)
-        components.month = month
-        components.day = day
-        components.minute = minute
-        components.hour = normalizedHour(hour, meridiem: meridiem)
-
-        guard var resetDate = components.date else {
-            return nil
-        }
-
-        if resetDate < now {
-            components.year = (components.year ?? calendar.component(.year, from: now)) + 1
-            guard let nextYearDate = components.date else {
-                return nil
-            }
-            resetDate = nextYearDate
-        }
-
-        return resetDate
-    }
-
-    private func normalizedHour(_ hour: Int, meridiem: String) -> Int {
-        switch (hour, meridiem) {
-        case (12, "AM"): return 0
-        case (12, "PM"): return 12
-        case (_, "PM"): return hour + 12
-        default: return hour
-        }
-    }
-
-    private func firstMatch(pattern: String, in text: String, group: Int) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
-        }
-
-        let range = NSRange(text.startIndex..., in: text)
-        guard
-            let match = regex.firstMatch(in: text, options: [], range: range),
-            let captureRange = Range(match.range(at: group), in: text)
-        else {
-            return nil
-        }
-
-        return String(text[captureRange]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -341,35 +203,6 @@ struct WindsurfUserStatusProtoParser {
     private func formatCurrency(micros: UInt64) -> String {
         let dollars = Double(micros) / 1_000_000.0
         return String(format: "$%.2f", dollars)
-    }
-}
-
-enum WindsurfSnapshotResolver {
-    static func resolve(
-        cached: WindsurfPageSnapshot?,
-        live: WindsurfPageSnapshot?,
-        preferLive: Bool
-    ) -> WindsurfPageSnapshot? {
-        if preferLive {
-            return live ?? cached
-        }
-        return live ?? cached
-    }
-}
-
-enum WindsurfQuotaDiagnostics {
-    static func shouldHideSuspiciousLocalQuota(
-        snapshot: WindsurfPageSnapshot,
-        hasLikelyLiveAuthCookies: Bool
-    ) -> Bool {
-        guard !hasLikelyLiveAuthCookies else {
-            return false
-        }
-
-        // Windsurf's local persisted quota state can report 100/100 while the live app UI shows usage.
-        // If we have no viable authenticated web session for a live refresh, prefer surfacing uncertainty
-        // instead of showing a confidently wrong "100% remaining / Healthy" state.
-        return snapshot.dailyUsagePercent == 0 && snapshot.weeklyUsagePercent == 0
     }
 }
 
