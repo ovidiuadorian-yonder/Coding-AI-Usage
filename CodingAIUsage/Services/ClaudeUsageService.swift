@@ -24,6 +24,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
 
     private let credentialLoader: ClaudeCredentialLoader
     private let networkClient: NetworkClient
+    private let diagnostic: DiagnosticRecorder
     private let cliExecutor: CLIExecutor
     private let claudeBinaryLocator: BinaryLocator
     private let cliParser = ClaudeCLIUsageParser()
@@ -43,10 +44,12 @@ actor ClaudeUsageService: ClaudeUsageServing {
         },
         claudeBinaryLocator: @escaping BinaryLocator = {
             ClaudeUsageService.defaultClaudeBinaryLocator()
-        }
+        },
+        diagnostic: @escaping DiagnosticRecorder = DiagnosticLog.claude
     ) {
         self.credentialLoader = credentialLoader
         self.networkClient = networkClient
+        self.diagnostic = diagnostic
         self.cliExecutor = cliExecutor
         self.claudeBinaryLocator = claudeBinaryLocator
     }
@@ -176,16 +179,23 @@ actor ClaudeUsageService: ClaudeUsageServing {
         }
 
         if httpResponse.statusCode == 400 || httpResponse.statusCode == 401 {
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let errorCode = json["error"] as? String,
-               errorCode == "invalid_grant" {
-                throw UsageError.authExpired("Claude Code: session expired - please re-login in Claude Code")
-            }
+            // Every 400/401 from this endpoint means the same thing to us — the stored grant is no
+            // longer usable — so the error code is recorded for diagnosis rather than branched on.
+            // `invalid_grant` specifically is the signature of the concurrent-client conflict.
+            let errorCode = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                .flatMap { $0?["error"] as? String }
+            logEndpoint(
+                "token",
+                status: httpResponse.statusCode,
+                response: httpResponse,
+                extra: "error=" + DiagnosticLog.field(errorCode ?? "unknown")
+            )
 
             throw UsageError.authExpired("Claude Code: session expired - please re-login in Claude Code")
         }
 
         if httpResponse.statusCode == 429 {
+            logEndpoint("token", status: 429, response: httpResponse)
             // The token endpoint is rate-limited. Surface this as .rateLimited (not .httpError) so
             // menu-open refreshes pause for Retry-After — a near-expiry token makes needsRefresh true
             // on every fetch, so retrying here before the limit clears keeps the rate limit alive.
@@ -195,6 +205,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
         }
 
         guard httpResponse.statusCode == 200 else {
+            logEndpoint("token", status: httpResponse.statusCode, response: httpResponse)
             throw UsageError.httpError(httpResponse.statusCode)
         }
 
@@ -202,6 +213,20 @@ actor ClaudeUsageService: ClaudeUsageServing {
               let accessToken = refreshResponse["access_token"] as? String else {
             throw UsageError.invalidResponse
         }
+
+        // Rotation probe: does the endpoint hand back a different refresh token than the one
+        // presented? If it consistently does, the stored credential the `claude` CLI owns is being
+        // superseded by our refresh — the mechanism behind CodexBar #1161. Fingerprints only.
+        let returnedRefreshToken = refreshResponse["refresh_token"] as? String
+        let changed = returnedRefreshToken != nil && returnedRefreshToken != refreshToken
+        logEndpoint(
+            "token",
+            status: 200,
+            response: httpResponse,
+            extra: "refresh-token-changed=\(changed) "
+                + "sent=\(DiagnosticLog.fingerprint(refreshToken)) "
+                + "returned=\(DiagnosticLog.fingerprint(returnedRefreshToken))"
+        )
 
         let expiresAt = (refreshResponse["expires_in"] as? Double)
             .map { Date().addingTimeInterval($0) }
@@ -242,14 +267,36 @@ actor ClaudeUsageService: ClaudeUsageServing {
             let usage = try decoder.decode(ClaudeUsageResponse.self, from: data)
             return usage.toServiceUsage()
         case 401, 403:
+            logEndpoint("usage", status: httpResponse.statusCode, response: httpResponse)
             throw UsageError.authExpired("Claude Code: session expired - please re-login in Claude Code")
         case 429:
+            logEndpoint("usage", status: 429, response: httpResponse)
             let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After")
                 .flatMap { Double($0) }
             throw UsageError.rateLimited(retryAfter: retryAfter)
         default:
+            logEndpoint("usage", status: httpResponse.statusCode, response: httpResponse)
             throw UsageError.httpError(httpResponse.statusCode)
         }
+    }
+
+    /// Emits one machine-greppable line per logged response, tagged with the endpoint that produced
+    /// it. `endpoint=usage` is api.anthropic.com; `endpoint=token` is platform.claude.com.
+    ///
+    /// Every line shares the shape `endpoint=… status=… retry-after=… [extra]`, so a single parser
+    /// covers all of them — including the successful-refresh line carrying the rotation signal.
+    private func logEndpoint(
+        _ endpoint: String,
+        status: Int,
+        response: HTTPURLResponse,
+        extra: String? = nil
+    ) {
+        let retryAfter = DiagnosticLog.retryAfter(response.value(forHTTPHeaderField: "Retry-After"))
+        var line = "endpoint=\(endpoint) status=\(status) retry-after=\(retryAfter)"
+        if let extra {
+            line += " " + extra
+        }
+        diagnostic(line)
     }
 
     private static func defaultClaudeBinaryLocator() -> String? {
