@@ -21,24 +21,37 @@ rate-limit pause). The 429s persist because they do not originate from polling f
 
 ### Diagnosis (verified)
 
-**1. The app competes with the `claude` CLI for a shared, rotating refresh token.**
+**1. The app competes with the `claude` CLI for a shared credential, and refreshing it breaks
+the CLI's copy.**
 
 `ClaudeUsageService.refreshCredentials` POSTs to `https://platform.claude.com/v1/oauth/token`
-using the refresh token the CLI stored. Anthropic rotates refresh tokens on use. The sequence:
+using the refresh token the CLI stored.
 
-1. The app reads access token `T1` from the Keychain and caches it.
-2. The CLI later refreshes, rotating the stored token to `T2`.
-3. The app's cached `T1` expires. `needsRefresh` fires.
-4. The app POSTs `T1`'s refresh token — already consumed by the CLI — and gets `invalid_grant`.
-5. Repeated on each menu-open refresh, the token endpoint returns **429**.
+**Confirmed by precedent, not by mechanism.** CodexBar — a macOS menu-bar usage meter with the
+same architecture — hit exactly this failure. Issue
+[#1161](https://github.com/steipete/CodexBar/issues/1161), *"CodexBar can desync Claude Code's
+OAuth refresh token, forcing daily re-login"* (filed against v0.27.0, closed COMPLETED). The
+shipped fix, verified in current `main`: `ClaudeOAuthCredentials.swift` switches on credential
+ownership and, for `.claudeCLI`-owned records, throws `refreshDelegatedToClaudeCLI` **without
+ever calling the token endpoint**. Both `~/.claude/.credentials.json` and the
+`Claude Code-credentials` Keychain item are classified `.claudeCLI`, so neither is rotated.
 
-The existing comment at `ClaudeUsageService.swift:186` describes this loop keeping the rate
-limit alive. `a52ea0a`'s commit message ("avoid double refresh-token consumption") confirms the
-rotation behaviour was already observed.
+**The mechanism is unproven.** An earlier draft of this spec asserted that Anthropic rotates
+refresh tokens on use. That is *not* established: no public source reproduces `invalid_grant`
+from re-presenting a consumed refresh token, none reports an observed `expires_in`, and an
+adversarial verification of the rotation claim failed (1-2). The desync is *consistent* with
+rotation but has other candidate explanations — server-side session invalidation,
+single-active-client enforcement, or the CLI overwriting the item with a token the app's own
+refresh had already superseded.
 
-The converse is also damaging: when the app's refresh *succeeds*, it rotates the token and
+**This does not weaken the design.** The remedy is identical under every candidate mechanism:
+do not present the CLI's refresh token to the token endpoint. That is what CodexBar shipped,
+and it is what every other examined meter does by default (see finding 5).
+
+A second-order harm is certain regardless of mechanism: when the app's refresh *succeeds*, it
 stores the result **in memory only** (`cacheRefreshedCredentials`). On app quit that is lost,
-leaving the CLI's stored refresh token dead.
+so any server-side state change the refresh caused is invisible to both the app and the CLI
+afterwards.
 
 **2. Keychain credentials are never TTL-evicted.**
 
@@ -64,6 +77,68 @@ The development machine holds **26** matching items: the legacy `Claude Code-cre
 2026. The legacy entry (modified 2026-09-06) happens to be the fresh one and is checked first,
 which masks the defect locally. On any machine without a legacy entry, the app picks one of 25
 mostly-stale items at random — presenting as permanent auth failure plus the refresh loop.
+
+**5. Every comparable third-party meter is read-only.**
+
+CodexBar reads `Claude Code-credentials` at four call sites, all `SecItemCopyMatching`; a search
+for `SecItemAdd|SecItemUpdate|SecItemDelete` under its Claude provider returns nothing.
+`ccstatusline` does not even deserialize the refresh token — its schema is
+`claudeAiOauth: { accessToken }` — and has zero hits for `refresh_token`, `oauth/token`, or
+`platform.claude.com`; on 401 it waits for the user to re-run `/login`. `ccusage` avoids
+credentials altogether by reading local JSONL. Read-only consumption is the established pattern,
+and it is the one pattern with no reported desync bug.
+
+**6. Claude Code resets the Keychain item's ACL on every refresh (~every 8 hours).**
+
+anthropics/claude-code [#41026](https://github.com/anthropics/claude-code/issues/41026)
+("OAuth token refresh overwrites keychain item and resets third-party app permissions", closed
+as duplicate) and [#22144](https://github.com/anthropics/claude-code/issues/22144) ("Reduce
+keychain prompt friction for third-party tools", labels `area:auth`/`area:security`, closed
+**not planned**). The CLI **deletes and recreates** the item on refresh, which resets its ACL
+and revokes a third-party reader's "Always Allow" grant. #22144 reports "5-10+ password prompts
+per day" and gives the refresh cadence as roughly every 8 hours.
+
+This is independent of OAuth rotation and of the 429 question, and it constrains Part B: a
+stable code-signing identity does **not** survive it. Any design that re-reads Keychain *data*
+on a short fixed interval will prompt shortly after each CLI refresh.
+
+**7. A 429 on the usage endpoint is not an authentication failure.**
+
+`GET https://api.anthropic.com/api/oauth/usage` returning 429 with
+`{"error":{"type":"rate_limit_error"}}` is independently reproduced in anthropics/claude-code
+[#31637](https://github.com/anthropics/claude-code/issues/31637),
+[#31021](https://github.com/anthropics/claude-code/issues/31021), and
+[#30930](https://github.com/anthropics/claude-code/issues/30930) (still open). #30930 records the
+token as valid with 4+ hours remaining, correct scopes, and still working for ordinary API calls
+while the usage endpoint 429s.
+
+Consequence: a 429 must never be treated as a stale credential or trigger a credential re-read.
+Doing so adds pressure with no possible benefit.
+
+**Unresolved: which endpoint produces the 429s observed on this machine.** The public evidence
+for usage-endpoint 429s is strong (three independent reporters, byte-identical bodies); the
+evidence for token-endpoint 429s is a single unverified report
+([#38248](https://github.com/anthropics/claude-code/issues/38248)). The two must not be
+conflated. Instrumentation to attribute the local symptom is being added before this spec's
+Part C is implemented; if the 429s prove to originate at the usage endpoint, removing the
+refresh path will not by itself resolve them, and Part C's justification rests solely on
+findings 1 and 5. Note also that `Retry-After` semantics here are unreliable — sources disagree
+on whether the header is sent at all — so backoff must tolerate its absence.
+
+**8. Anthropic's stated position gives no sanctioned third-party OAuth path.**
+
+The [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) states that
+OAuth authentication "is intended exclusively for purchasers of Claude Free, Pro, Max, Team, and
+Enterprise subscription plans and is designed to support ordinary use of Claude Code and other
+native Anthropic applications", and directs third-party developers to API-key authentication.
+
+Scope, stated honestly: the prohibitions are phrased around routing requests, offering Claude.ai
+login, and intermediating credentials. A purely local, read-only meter that only reads a stored
+`accessToken` and GETs `/api/oauth/usage` is a grey zone the text does not name. An app that
+POSTs to the token endpoint with Anthropic's own `client_id` and a spoofed
+`User-Agent: claude-code/<version>` is acting as an OAuth client and is outside it. Removing the
+refresh path (Part C) moves the app from the second category into the first. This is a further
+argument for Part C, not an independent claim about the app's overall standing.
 
 ### Rejected: moving credentials to `~/.claude/.credentials.json`
 
@@ -119,15 +194,33 @@ Failure handling is asymmetric and this asymmetry is required:
   — stops the walk immediately and surfaces the error. Falling forward on denial would turn one
   declined prompt into up to three.
 
-### Part B — Collapse the credential layer, evict on TTL
+### Part B — Collapse the credential layer, re-read on demand
 
 `loadFileCredentials`, `loadKeychainCredentials`, and `loadAnyCredentials` collapse into a single
 `loadCredentials(forceRefresh: Bool = false) -> ClaudeCredentials?`, which tries the file paths
 first (priority unchanged) and then the Keychain candidate walk from Part A.
 
-- **Keychain results are TTL-evicted exactly like file results.** The `case .keychain` branch
-  returning the cached slot unconditionally is removed; both sources honour the 300s window.
-  This is what lets the app observe CLI rotations.
+- **Keychain results become re-readable, but on demand rather than on a fixed clock.** The
+  `case .keychain` branch returning the cached slot unconditionally is removed. It is **not**
+  replaced with the file path's blind 300s eviction: finding 6 shows the CLI resets the item's
+  ACL every ~8 hours, so a short fixed interval would prompt the user shortly after each CLI
+  refresh — roughly three times a day, and a signing identity does not prevent it.
+
+  Instead, a cached Keychain credential is re-read only when there is a reason to:
+
+  1. the cached token is **at or past** its expiry (including the 60s skew below), or
+  2. a **401/403** has just been observed (`forceRefresh: true` from Part C step 3).
+
+  A cached credential that is still valid by its own `expiresAt` is reused without touching the
+  Keychain, however old the cache entry is. This preserves the property that matters — the app
+  never uses a token past its stated lifetime — while keeping Keychain *data* reads to roughly
+  the CLI's own refresh cadence rather than 288 times a day.
+
+  **File-sourced credentials keep the 300s TTL.** Reading a file has no ACL cost, so there is no
+  reason to make that path lazier.
+
+  The candidate-list cache from Part A keeps its 300s TTL regardless: it is attribute-only and
+  never prompts.
 - **`needsRefresh` becomes `isExpired(_:)`**, with a **60s skew** so a request never starts with
   a token about to lapse mid-flight.
 - **A `nil` `expiresAt` is treated as usable, not expired.** Under Part C, "expired" routes
@@ -196,12 +289,13 @@ makes the current handling wrong in two ways.
 
 ## Risks & mitigations
 
-- **`sign.sh` becomes load-bearing.** TTL-evicting the Keychain cache turns one data read per
-  session into one per five minutes. This is silent only while the stable self-signed identity
-  from the prior spec holds its "Always Allow" grant. On an ad-hoc build it becomes a prompt
-  every five minutes rather than once per session. Mitigation: `build.sh` already fails loudly
-  when the identity is missing; the README must state that skipping signing now degrades far
-  worse than before.
+- **Keychain prompts cannot be fully eliminated.** Finding 6 establishes that the CLI deletes
+  and recreates the credential item every ~8 hours, resetting its ACL. A stable signing identity
+  keeps the grant across *rebuilds* but does not survive the CLI's recreation of the item, so
+  some re-granting is unavoidable for any third-party reader on macOS. Part B's on-demand
+  re-read bounds the exposure to roughly the CLI's own refresh cadence instead of every five
+  minutes; `sign.sh` remains necessary but is not sufficient. The README must say so plainly
+  rather than implying signing makes prompts go away.
 - **A lapsed token now requires user action.** Previously the app attempted self-healing via
   refresh. It will now prompt. This is deliberate: the refresh was unreliable, damaged the CLI's
   stored token, and caused the rate limits. The fresh re-read in Part C step 2 handles the
@@ -227,10 +321,12 @@ Existing coverage is 839 lines across `ClaudeUsageTests.swift` and
 - `testClaudeUsageServiceSurfacesRefreshRateLimitAsRateLimited`
 - `testWritingKeychainCredentialsCallsCredentialWriter`
 
-**Inverted:**
+**Retained, and now load-bearing:**
 
-- `testKeychainCredentialsRemainCachedAcrossPollInterval` becomes
-  `testKeychainCredentialsAreReReadAfterTTL`.
+- `testKeychainCredentialsRemainCachedAcrossPollInterval` — under Part B's on-demand re-read a
+  *still-valid* Keychain credential is deliberately reused across poll intervals, so this test
+  encodes the property that limits ACL prompts. An earlier draft of this spec proposed inverting
+  it to `…AreReReadAfterTTL`; that would now assert the opposite of the intended behaviour.
 
 **Adapted:**
 
@@ -254,6 +350,12 @@ Existing coverage is 839 lines across `ClaudeUsageTests.swift` and
 - A token expiring within the 60s skew is treated as expired.
 - An expired credential triggers exactly one forced re-read; a fresh valid one then succeeds.
 - An expired credential whose forced re-read is also expired yields `.authExpired`.
+- A 401 triggers exactly one forced Keychain re-read.
+- **A 429 triggers no credential re-read at all** (finding 7) — the credential cache is untouched
+  and `.rateLimited` propagates unchanged.
+- A cached Keychain credential that is still valid by its own `expiresAt` is reused without any
+  Keychain data read, regardless of cache age.
+- File-sourced credentials still honour the 300s TTL.
 - `.authExpired` preserves existing `windows` and does not overwrite the persisted cache.
 - **Guard test:** `ClaudeUsageService` issues no request to any `platform.claude.com` host — a
   network-client spy fails the test if one is attempted.
