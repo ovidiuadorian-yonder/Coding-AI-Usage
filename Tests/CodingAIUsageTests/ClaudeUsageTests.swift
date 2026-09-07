@@ -108,36 +108,9 @@ final class ClaudeUsageTests: XCTestCase {
         }
     }
 
-    func testClaudeUsageServicePrefersKeychainAPIOverCLI() async throws {
-        let keychain = KeychainService(
-            currentUsername: { "tester" },
-            credentialReader: { _, _ in #"{"claudeAiOauth":{"accessToken":"kc-token","expiresAt":9999999999999}}"# },
-            hashedServiceNameFinder: { "Claude Code-credentials" }
-        )
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("claude-kc-\(UUID().uuidString)", isDirectory: true)
-        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: keychain)
-        let service = ClaudeUsageService(
-            credentialLoader: loader,
-            networkClient: { request in
-                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                let data = Data(#"{"five_hour":{"utilization":15,"resets_at":"2026-04-03T18:00:00Z"},"seven_day":{"utilization":35}}"#.utf8)
-                return (data, response)
-            },
-            cliExecutor: { _, _ in XCTFail("CLI must not run when Keychain credentials exist"); return .init(exitCode: 1, output: "") },
-            claudeBinaryLocator: { "/stub/claude" }
-        )
-
-        let usage = try await service.fetchUsage()
-
-        XCTAssertEqual(usage.fiveHourWindow?.remainingPercent, 85)
-        XCTAssertNotNil(usage.fiveHourWindow?.resetTime, "API path restores the reset countdown")
-    }
-
     func testClaudeUsageServiceFallsBackToCLIWhenNoFileOrKeychainCredentials() async throws {
         let loader = ClaudeCredentialLoader(
-            homeDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,
-            keychainService: .empty
+            homeDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         )
 
         let service = ClaudeUsageService(
@@ -166,56 +139,6 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertEqual(usage.weeklyWindow?.remainingPercent, 60)
     }
 
-    func testClaudeUsageServiceRefreshesExpiredFileTokenBeforeFetchingUsage() async throws {
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("claude-api-refresh-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        let filePath = tempDir.appendingPathComponent(".claude/.credentials.json")
-        try FileManager.default.createDirectory(at: filePath.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try """
-        {"claudeAiOauth":{"accessToken":"stale-token","refreshToken":"refresh-token","expiresAt":0}}
-        """.write(to: filePath, atomically: true, encoding: .utf8)
-
-        let requestRecorder = URLRequestRecorder()
-        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: .empty)
-        let service = ClaudeUsageService(
-            credentialLoader: loader,
-            networkClient: { request in
-                requestRecorder.urls.append(request.url?.absoluteString ?? "")
-
-                if request.url?.absoluteString == "https://platform.claude.com/v1/oauth/token" {
-                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                    let data = Data(#"{"access_token":"fresh-token","refresh_token":"fresh-refresh","expires_in":3600}"#.utf8)
-                    return (data, response)
-                }
-
-                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                let data = Data(#"{"five_hour":{"utilization":20,"resets_at":"2026-04-03T18:00:00.000Z"},"seven_day":{"utilization":45,"resets_at":"2026-04-08T18:00:00.000Z"}}"#.utf8)
-                return (data, response)
-            },
-            cliExecutor: { _, _ in
-                XCTFail("CLI should not be used when file credentials exist")
-                return .init(exitCode: 1, output: "")
-            },
-            claudeBinaryLocator: { nil }
-        )
-
-        let usage = try await service.fetchUsage()
-
-        XCTAssertEqual(usage.fiveHourWindow?.remainingPercent, 80)
-        XCTAssertEqual(requestRecorder.urls, [
-            "https://platform.claude.com/v1/oauth/token",
-            "https://api.anthropic.com/api/oauth/usage"
-        ])
-
-        let onDisk = try String(contentsOf: filePath, encoding: .utf8)
-        XCTAssertTrue(onDisk.contains("stale-token"), "refresh must not overwrite the credentials file")
-        // Use a JSON-key-aware check: the accessToken value must still be the original stale token.
-        // A plain contains("fresh-token") would be a false positive because "refreshToken":"refresh-token"
-        // contains "fresh-token" as a substring.
-        XCTAssertFalse(onDisk.contains("\"accessToken\":\"fresh-token\""), "refreshed token must stay in memory only")
-    }
-
     func testClaudeUsageServiceReloadsCredentialsAfter401AndRetriesOnce() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("claude-api-retry-\(UUID().uuidString)", isDirectory: true)
@@ -226,7 +149,7 @@ final class ClaudeUsageTests: XCTestCase {
             .write(to: filePath, atomically: true, encoding: .utf8)
 
         let usageCalls = CallCounter()
-        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: .empty)
+        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path)
         let service = ClaudeUsageService(
             credentialLoader: loader,
             networkClient: { request in
@@ -304,8 +227,7 @@ final class ClaudeUsageTests: XCTestCase {
         }
 
         let loader = ClaudeCredentialLoader(
-            homeDirectory: tempDir.path,
-            keychainService: .empty
+            homeDirectory: tempDir.path
         )
         // Inject the absolute path directly so the executor runs fakeClaude without PATH lookup.
         let service = ClaudeUsageService(
@@ -376,7 +298,7 @@ final class ClaudeUsageTests: XCTestCase {
             .write(to: filePath, atomically: true, encoding: .utf8)
 
         let recorder = HeaderRecorder()
-        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: .empty)
+        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path)
         let service = ClaudeUsageService(
             credentialLoader: loader,
             networkClient: { request in
@@ -402,37 +324,6 @@ final class ClaudeUsageTests: XCTestCase {
 
         XCTAssertEqual(usage.fiveHourWindow?.remainingPercent, 100)
         XCTAssertEqual(usage.weeklyWindow?.remainingPercent, 80)
-    }
-
-    func testClaudeUsageServiceDoesNotWriteRefreshedTokenBackToKeychain() async throws {
-        let writeCounter = CallCounter()
-        let keychain = KeychainService(
-            currentUsername: { "tester" },
-            credentialWriter: { _, _, _ in writeCounter.value += 1 },
-            credentialReader: { _, _ in #"{"claudeAiOauth":{"accessToken":"stale","refreshToken":"r","expiresAt":0}}"# },
-            hashedServiceNameFinder: { "Claude Code-credentials" }
-        )
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("claude-nowrite-\(UUID().uuidString)", isDirectory: true)
-        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: keychain)
-        let service = ClaudeUsageService(
-            credentialLoader: loader,
-            networkClient: { request in
-                if request.url?.absoluteString == "https://platform.claude.com/v1/oauth/token" {
-                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                    return (Data(#"{"access_token":"fresh","expires_in":3600}"#.utf8), response)
-                }
-                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                return (Data(#"{"five_hour":{"utilization":10},"seven_day":{"utilization":20}}"#.utf8), response)
-            },
-            cliExecutor: { _, _ in XCTFail("CLI must not run"); return .init(exitCode: 1, output: "") },
-            claudeBinaryLocator: { nil }
-        )
-
-        let usage = try await service.fetchUsage()
-
-        XCTAssertEqual(usage.fiveHourWindow?.remainingPercent, 90)
-        XCTAssertEqual(writeCounter.value, 0, "refresh must not write the new token back to the Keychain")
     }
 
     func testClaudeCLIUsageParserParsesHumanResetTimeSameDay() throws {
@@ -512,45 +403,6 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertGreaterThan(reset, fixedNow)
     }
 
-    func testClaudeUsageServiceDoesNotDoubleRefreshAfter401() async throws {
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("claude-dblrefresh-\(UUID().uuidString)", isDirectory: true)
-        let filePath = tempDir.appendingPathComponent(".claude/.credentials.json")
-        try FileManager.default.createDirectory(at: filePath.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try #"{"claudeAiOauth":{"accessToken":"stale","refreshToken":"rt","expiresAt":0}}"#
-            .write(to: filePath, atomically: true, encoding: .utf8)
-
-        let tokenCalls = CallCounter()
-        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: .empty)
-        let service = ClaudeUsageService(
-            credentialLoader: loader,
-            networkClient: { request in
-                if request.url?.absoluteString == "https://platform.claude.com/v1/oauth/token" {
-                    tokenCalls.value += 1
-                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                    return (Data(#"{"access_token":"fresh","expires_in":3600}"#.utf8), response)
-                }
-                // Usage endpoint always rejects -> exercises the 401 recovery path.
-                let response = HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!
-                return (Data(), response)
-            },
-            cliExecutor: { _, _ in XCTFail("CLI must not run"); return .init(exitCode: 1, output: "") },
-            claudeBinaryLocator: { nil }
-        )
-
-        do {
-            _ = try await service.fetchUsage()
-            XCTFail("expected fetchUsage to throw authExpired")
-        } catch let error as UsageError {
-            guard case .authExpired = error else {
-                XCTFail("expected .authExpired, got \(error)")
-                return
-            }
-        }
-
-        XCTAssertEqual(tokenCalls.value, 1, "refresh token must not be consumed twice across the 401 retry")
-    }
-
     func testClaudeCLIUsageParserParsesMultiComponentTimezone() throws {
         let fixedNow = Date(timeIntervalSince1970: 1_775_894_400) // 2026-04-11T08:00:00Z
         let parser = ClaudeCLIUsageParser(now: { fixedNow })
@@ -564,80 +416,4 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertEqual(comps.minute, 40)
     }
 
-    func testClaudeUsageServiceDoesNotFallBackToCLIWhenKeychainAPIFails() async throws {
-        let keychain = KeychainService(
-            currentUsername: { "tester" },
-            credentialReader: { _, _ in #"{"claudeAiOauth":{"accessToken":"kc-token","expiresAt":9999999999999}}"# },
-            hashedServiceNameFinder: { "Claude Code-credentials" }
-        )
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("claude-kcfail-\(UUID().uuidString)", isDirectory: true)
-        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: keychain)
-        let service = ClaudeUsageService(
-            credentialLoader: loader,
-            networkClient: { request in
-                let response = HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil, headerFields: nil)!
-                return (Data(), response)
-            },
-            cliExecutor: { _, _ in
-                XCTFail("CLI must not run as a fallback when the Keychain/API path errors")
-                return .init(exitCode: 1, output: "")
-            },
-            claudeBinaryLocator: { "/stub/claude" }
-        )
-
-        do {
-            _ = try await service.fetchUsage()
-            XCTFail("expected fetchUsage to throw when the API is rate-limited")
-        } catch let error as UsageError {
-            guard case .rateLimited = error else {
-                XCTFail("expected .rateLimited, got \(error)")
-                return
-            }
-        }
-    }
-
-    func testClaudeUsageServiceSurfacesRefreshRateLimitAsRateLimited() async throws {
-        // A near-expiry token triggers a proactive refresh on every poll. When the token endpoint
-        // itself is rate-limited we must surface .rateLimited (with Retry-After) so polling backs off,
-        // rather than .httpError(429) which keeps hammering the endpoint at the base interval.
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("claude-refresh-429-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        let filePath = tempDir.appendingPathComponent(".claude/.credentials.json")
-        try FileManager.default.createDirectory(at: filePath.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try #"{"claudeAiOauth":{"accessToken":"stale-token","refreshToken":"refresh-token","expiresAt":0}}"#
-            .write(to: filePath, atomically: true, encoding: .utf8)
-
-        let loader = ClaudeCredentialLoader(homeDirectory: tempDir.path, keychainService: .empty)
-        let service = ClaudeUsageService(
-            credentialLoader: loader,
-            networkClient: { request in
-                XCTAssertEqual(request.url?.absoluteString, "https://platform.claude.com/v1/oauth/token")
-                let response = HTTPURLResponse(
-                    url: request.url!,
-                    statusCode: 429,
-                    httpVersion: nil,
-                    headerFields: ["Retry-After": "120"]
-                )!
-                return (Data(), response)
-            },
-            cliExecutor: { _, _ in
-                XCTFail("CLI should not be used when file credentials exist")
-                return .init(exitCode: 1, output: "")
-            },
-            claudeBinaryLocator: { nil }
-        )
-
-        do {
-            _ = try await service.fetchUsage()
-            XCTFail("expected fetchUsage to throw when the refresh endpoint is rate-limited")
-        } catch let error as UsageError {
-            guard case .rateLimited(let retryAfter) = error else {
-                XCTFail("expected .rateLimited, got \(error)")
-                return
-            }
-            XCTAssertEqual(retryAfter, 120)
-        }
-    }
 }

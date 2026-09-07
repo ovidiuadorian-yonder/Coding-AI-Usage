@@ -106,6 +106,11 @@ holds the ACL entry.
 2. **`claude /usage` → `ClaudeCLIUsageParser`.** The working path on macOS.
 3. Neither available → `.noCredentials` ("Claude Code: not logged in").
 
+On a 401/403 from the API the file is re-read **once** and the request retried, but only if the
+re-read yields a *different* token. A 401 commonly just means the CLI rotated the file token since
+it was cached; a file read costs nothing and cannot prompt. This is a retry, not a refresh — the
+token endpoint is still never contacted. If the retry also fails, `.authExpired`.
+
 The CLI is promoted from last-resort fallback to the primary macOS source. This is a deliberate
 reversal of Part B of the 2026-06-11 spec, which promoted the API to restore reset times; that
 goal is preserved, because the CLI parser now yields resets correctly (see the check above).

@@ -2,195 +2,148 @@ import XCTest
 @testable import CodingAIUsage
 
 final class ClaudeCredentialLoaderTests: XCTestCase {
-    func testFileCredentialsPreferredOverKeychain() throws {
-        let tempDir = makeTempDirectory()
-        let filePath = tempDir.appendingPathComponent(".claude/.credentials.json").path
-        try FileManager.default.createDirectory(
-            at: URL(fileURLWithPath: filePath).deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
+    private func payload(accessToken: String, expiresAt: Int? = nil) -> Data {
+        let expiry = expiresAt.map { ",\"expiresAt\":\($0)" } ?? ""
+        return Data("""
+        {"claudeAiOauth":{"accessToken":"\(accessToken)","refreshToken":"r"\(expiry)}}
+        """.utf8)
+    }
 
-        let fileJSON = credentialsJSON(accessToken: "file-token", refreshToken: "file-refresh")
-        try fileJSON.write(toFile: filePath, atomically: true, encoding: .utf8)
-
-        let keychain = KeychainService(
-            currentUsername: { "tester" },
-            credentialReader: { _, _ in self.credentialsJSON(accessToken: "keychain-token") },
-            hashedServiceNameFinder: { "Claude Code-credentials" }
-        )
-
+    func testLoadsCredentialsFromDotfilePath() throws {
         let loader = ClaudeCredentialLoader(
-            homeDirectory: tempDir.path,
-            keychainService: keychain
+            homeDirectory: "/home/test",
+            readFile: { $0.hasSuffix(".claude/.credentials.json") ? self.payload(accessToken: "file-token") : nil }
         )
 
-        let credentials = try loader.loadAnyCredentials()
-
-        XCTAssertEqual(credentials?.accessToken, "file-token")
-        XCTAssertEqual(credentials?.refreshToken, "file-refresh")
-        XCTAssertEqual(credentials?.source, .file(path: filePath))
+        XCTAssertEqual(try loader.loadCredentials()?.accessToken, "file-token")
     }
 
-    func testHashedKeychainServiceNameIsResolvedWhenLegacyEntryIsMissing() throws {
-        var seenHashedLookup = false
-        let service = KeychainService(
-            currentUsername: { "tester" },
-            credentialReader: { serviceName, _ in
-                guard serviceName == "Claude Code-credentials-abc123" else { return nil }
-                seenHashedLookup = true
-                return self.credentialsJSON(accessToken: "hashed-token")
-            },
-            hashedServiceNameFinder: { "Claude Code-credentials-abc123" }
+    func testFallsBackToNonDotfilePath() throws {
+        let loader = ClaudeCredentialLoader(
+            homeDirectory: "/home/test",
+            readFile: { $0.hasSuffix(".claude/credentials.json") ? self.payload(accessToken: "alt-token") : nil }
         )
 
-        let result = try service.readClaudeCredentialsJSON()
-
-        XCTAssertTrue(seenHashedLookup)
-        XCTAssertEqual(result, credentialsJSON(accessToken: "hashed-token"))
+        XCTAssertEqual(try loader.loadCredentials()?.accessToken, "alt-token")
     }
 
-    func testWritingKeychainCredentialsCallsCredentialWriter() throws {
-        let payload = credentialsJSON(accessToken: "fresh-token", refreshToken: "fresh-refresh")
-        var writerInput: (json: String, serviceName: String, account: String)?
+    func testReturnsNilWhenNoCredentialFileExists() throws {
+        // The expected state on macOS: Claude Code keeps credentials in the Keychain, which this
+        // loader deliberately never reads. The caller falls back to the CLI.
+        let loader = ClaudeCredentialLoader(homeDirectory: "/home/test", readFile: { _ in nil })
 
-        let service = KeychainService(
-            currentUsername: { "tester" },
-            credentialWriter: { json, serviceName, account in
-                writerInput = (json, serviceName, account)
-            }
+        XCTAssertNil(try loader.loadCredentials())
+        XCTAssertFalse(loader.hasCredentialFile())
+    }
+
+    func testMalformedPayloadIsIgnored() throws {
+        let loader = ClaudeCredentialLoader(
+            homeDirectory: "/home/test",
+            readFile: { _ in Data(#"{"notTheRightShape":true}"#.utf8) }
         )
 
-        try service.writeClaudeCredentialsJSON(payload, serviceName: "Claude Code-credentials")
-
-        XCTAssertEqual(writerInput?.json, payload)
-        XCTAssertEqual(writerInput?.serviceName, "Claude Code-credentials")
-        XCTAssertEqual(writerInput?.account, "tester")
+        XCTAssertNil(try loader.loadCredentials())
     }
 
     func testCredentialCacheExpiresAfterTTL() throws {
-        let tempDir = makeTempDirectory()
-        let filePath = tempDir.appendingPathComponent(".claude/.credentials.json").path
-        try FileManager.default.createDirectory(
-            at: URL(fileURLWithPath: filePath).deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-
-        let fileJSON = credentialsJSON(accessToken: "file-token")
-        try fileJSON.write(toFile: filePath, atomically: true, encoding: .utf8)
-
-        var now = Date(timeIntervalSince1970: 1_000)
+        var now = Date(timeIntervalSince1970: 1_000_000)
+        var reads = 0
         let loader = ClaudeCredentialLoader(
-            homeDirectory: tempDir.path,
-            keychainService: KeychainService.empty,
+            homeDirectory: "/home/test",
             now: { now },
-            cacheTTL: 300
+            cacheTTL: 300,
+            readFile: { _ in
+                reads += 1
+                return self.payload(accessToken: "token-\(reads)")
+            }
         )
 
-        _ = try loader.loadAnyCredentials()
-        XCTAssertEqual(loader.cacheState.cachedAccessToken, "file-token")
-
-        now = now.addingTimeInterval(301)
-        _ = try loader.loadAnyCredentials()
-
-        XCTAssertEqual(loader.cacheState.cachedAccessToken, "file-token")
+        XCTAssertEqual(try loader.loadCredentials()?.accessToken, "token-1")
+        now = now.addingTimeInterval(299)
+        XCTAssertEqual(try loader.loadCredentials()?.accessToken, "token-1", "still inside the TTL")
+        now = now.addingTimeInterval(2)
+        XCTAssertEqual(try loader.loadCredentials()?.accessToken, "token-2", "TTL elapsed, re-read")
     }
 
-    func testKeychainCredentialsRemainCachedAcrossPollInterval() throws {
-        var readCount = 0
-        var now = Date(timeIntervalSince1970: 1_000)
+    func testForceRefreshBypassesTheCache() throws {
+        var reads = 0
         let loader = ClaudeCredentialLoader(
-            homeDirectory: makeTempDirectory().path,
-            keychainService: KeychainService(
-                currentUsername: { "tester" },
-                credentialReader: { _, _ in
-                    readCount += 1
-                    return self.credentialsJSON(accessToken: "keychain-token")
-                },
-                hashedServiceNameFinder: { "Claude Code-credentials" }
-            ),
-            now: { now },
-            cacheTTL: 300
+            homeDirectory: "/home/test",
+            readFile: { _ in
+                reads += 1
+                return self.payload(accessToken: "token-\(reads)")
+            }
         )
 
-        let first = try loader.loadKeychainCredentials()
-        now = now.addingTimeInterval(301)
-        let second = try loader.loadKeychainCredentials()
-
-        XCTAssertEqual(first?.accessToken, "keychain-token")
-        XCTAssertEqual(second?.accessToken, "keychain-token")
-        XCTAssertEqual(readCount, 1, "Keychain should not be re-read on each polling refresh")
-    }
-
-    func testKeychainCredentialsAreReReadAfterCacheInvalidation() throws {
-        var readCount = 0
-        let loader = ClaudeCredentialLoader(
-            homeDirectory: makeTempDirectory().path,
-            keychainService: KeychainService(
-                currentUsername: { "tester" },
-                credentialReader: { _, _ in
-                    readCount += 1
-                    return self.credentialsJSON(accessToken: "keychain-token")
-                },
-                hashedServiceNameFinder: { "Claude Code-credentials" }
-            )
-        )
-
-        _ = try loader.loadKeychainCredentials()
-        XCTAssertEqual(readCount, 1)
-
-        loader.invalidateCache()
-        _ = try loader.loadKeychainCredentials()
-
-        XCTAssertEqual(readCount, 2, "Keychain should be re-read after cache invalidation (401 path)")
+        XCTAssertEqual(try loader.loadCredentials()?.accessToken, "token-1")
+        XCTAssertEqual(try loader.loadCredentials(forceRefresh: true)?.accessToken, "token-2")
     }
 
     func testInvalidateCacheClearsCachedCredentials() throws {
-        let tempDir = makeTempDirectory()
-        let filePath = tempDir.appendingPathComponent(".claude/.credentials.json").path
-        try FileManager.default.createDirectory(
-            at: URL(fileURLWithPath: filePath).deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-
-        let fileJSON = credentialsJSON(accessToken: "file-token")
-        try fileJSON.write(toFile: filePath, atomically: true, encoding: .utf8)
-
+        var invalidations = 0
         let loader = ClaudeCredentialLoader(
-            homeDirectory: tempDir.path,
-            keychainService: KeychainService.empty
+            homeDirectory: "/home/test",
+            readFile: { _ in self.payload(accessToken: "file-token") },
+            onInvalidate: { invalidations += 1 }
         )
 
-        _ = try loader.loadAnyCredentials()
+        _ = try loader.loadCredentials()
+        XCTAssertEqual(loader.cacheState.cachedAccessToken, "file-token")
+
         loader.invalidateCache()
 
         XCTAssertNil(loader.cacheState.cachedAccessToken)
+        XCTAssertEqual(invalidations, 1)
     }
 
-    private func makeTempDirectory() -> URL {
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("claude-credentials-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.removeItem(at: tempDir)
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        return tempDir
+    // MARK: - Expiry
+
+    func testTokenPastItsExpiryIsExpired() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let loader = ClaudeCredentialLoader(
+            homeDirectory: "/home/test",
+            now: { now },
+            readFile: { _ in self.payload(accessToken: "t", expiresAt: 999_000_000) }
+        )
+
+        let credentials = try XCTUnwrap(loader.loadCredentials())
+        XCTAssertTrue(loader.isExpired(credentials))
     }
 
-    private func credentialsJSON(
-        accessToken: String,
-        refreshToken: String? = nil,
-        expiresAtMilliseconds: Double = 1_800_000_000_000
-    ) -> String {
-        var oauth: [String: Any] = [
-            "accessToken": accessToken,
-            "expiresAt": expiresAtMilliseconds
-        ]
-        if let refreshToken {
-            oauth["refreshToken"] = refreshToken
-        }
+    func testTokenExpiringInsideTheSkewIsExpired() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let loader = ClaudeCredentialLoader(
+            homeDirectory: "/home/test",
+            now: { now },
+            readFile: { _ in self.payload(accessToken: "t", expiresAt: 1_000_030_000) } // +30s
+        )
 
-        let payload: [String: Any] = [
-            "claudeAiOauth": oauth
-        ]
-        let data = try! JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
-        return String(decoding: data, as: UTF8.self)
+        let credentials = try XCTUnwrap(loader.loadCredentials())
+        XCTAssertTrue(loader.isExpired(credentials), "must not start a request with a token about to lapse")
+    }
+
+    func testTokenComfortablyInTheFutureIsNotExpired() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let loader = ClaudeCredentialLoader(
+            homeDirectory: "/home/test",
+            now: { now },
+            readFile: { _ in self.payload(accessToken: "t", expiresAt: 1_003_600_000) } // +1h
+        )
+
+        let credentials = try XCTUnwrap(loader.loadCredentials())
+        XCTAssertFalse(loader.isExpired(credentials))
+    }
+
+    func testMissingExpiryIsTreatedAsUsable() throws {
+        // The app cannot refresh, so inferring expiry from a missing field would discard a working
+        // token. A 401 covers that case instead.
+        let loader = ClaudeCredentialLoader(
+            homeDirectory: "/home/test",
+            readFile: { _ in self.payload(accessToken: "t") }
+        )
+
+        let credentials = try XCTUnwrap(loader.loadCredentials())
+        XCTAssertNil(credentials.expiresAt)
+        XCTAssertFalse(loader.isExpired(credentials))
     }
 }
