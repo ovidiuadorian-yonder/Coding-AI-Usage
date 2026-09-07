@@ -1,4 +1,3 @@
-import SQLite3
 import XCTest
 @testable import CodingAIUsage
 
@@ -89,13 +88,14 @@ final class WindsurfDevinMigrationTests: XCTestCase {
 
     private func usage(planEndUnixMillis: Int64?, dailyReset: Int64, weeklyReset: Int64) async throws -> ServiceUsage {
         let dbURL = try makeStateDB("Devin", modified: Self.now)
+        try FileManager.default.removeItem(at: dbURL) // placeholder exists only to set the mtime
         let planEnd = planEndUnixMillis.map { "\"endTimestamp\":\($0)," } ?? ""
         let planInfo = """
         {"planName":"Teams","startTimestamp":0,\(planEnd)"usage":{},"billingStrategy":"quota",\
         "quotaUsage":{"dailyRemainingPercent":61,"weeklyRemainingPercent":30,\
         "dailyResetAtUnix":\(dailyReset),"weeklyResetAtUnix":\(weeklyReset)}}
         """
-        try createWindsurfStateDB(at: dbURL, entries: [
+        try createWindsurfStateDatabase(at: dbURL, entries: [
             ("windsurfAuthStatus",
              #"{"apiKey":"sk-ws-test","allowedCommandModelConfigsProtoBinaryBase64":[],"userStatusProtoBinaryBase64":""}"#),
             ("windsurf.settings.cachedPlanInfo", planInfo)
@@ -134,7 +134,7 @@ final class WindsurfDevinMigrationTests: XCTestCase {
         // Only the proto can reach this state: `WindsurfCachedPlanInfo.endTimestamp` is
         // non-optional, so a plan-info blob without it fails to decode entirely rather than
         // arriving unjudgeable. This builds a proto carrying quota and resets but no plan end.
-        let proto = protoMessage([
+        let proto = protoFields([
             protoVarint(14, 61),                 // daily remaining %
             protoVarint(15, 30),                 // weekly remaining %
             protoVarint(16, 1_851_150_000),      // extra usage micros
@@ -142,7 +142,8 @@ final class WindsurfDevinMigrationTests: XCTestCase {
             protoVarint(18, 1_788_681_600)       // weekly reset, elapsed
         ])
         let dbURL = try makeStateDB("Devin", modified: Self.now)
-        try createWindsurfStateDB(at: dbURL, entries: [
+        try FileManager.default.removeItem(at: dbURL) // placeholder exists only to set the mtime
+        try createWindsurfStateDatabase(at: dbURL, entries: [
             ("windsurfAuthStatus",
              "{\"apiKey\":\"sk-ws-test\",\"allowedCommandModelConfigsProtoBinaryBase64\":[],"
              + "\"userStatusProtoBinaryBase64\":\"\(Data(proto).base64EncodedString())\"}")
@@ -156,6 +157,31 @@ final class WindsurfDevinMigrationTests: XCTestCase {
         XCTAssertEqual(result.primaryWindow?.remainingPercent, 61)
     }
 
+    func testStaleJSONSnapshotIsDiscardedAlongsideStalePlanInfo() async throws {
+        // Regression: the JSON-candidate path takes its plan end from the cached plan info. When the
+        // gate was applied inside `readCachedPlanInfo`, a stale plan info became nil, the JSON
+        // snapshot inherited a nil plan end, and the gate then retained it as "cannot be judged" —
+        // displaying months-old percentages as current. The gate now runs once on the merged
+        // snapshot so this source is judged too.
+        let dbURL = try makeStateDB("Devin", modified: Self.now)
+        try FileManager.default.removeItem(at: dbURL)
+        try createWindsurfStateDatabase(at: dbURL, entries: [
+            ("windsurfAuthStatus",
+             #"{"apiKey":"sk-ws-test","allowedCommandModelConfigsProtoBinaryBase64":[],"userStatusProtoBinaryBase64":""}"#),
+            // Billing period ended 2026-05-28 — the real fossil.
+            ("windsurf.settings.cachedPlanInfo",
+             #"{"planName":"Teams","startTimestamp":0,"endTimestamp":1779956099000,"usage":{},"billingStrategy":"quota"}"#),
+            ("codeium.windsurf",
+             #"{"windsurf.state.cachedUsageSnapshot":{"dailyUsagePercent":39,"weeklyUsagePercent":70}}"#)
+        ])
+
+        let service = WindsurfUsageService(stateDBLocator: { dbURL.path }, now: { Self.now })
+        let result = try await service.fetchUsage()
+
+        XCTAssertTrue(result.windows.isEmpty, "stale JSON snapshot must not be displayed")
+        XCTAssertNotNil(result.error)
+    }
+
     // MARK: - Part D: identity
 
     func testDisplayNameIsDevinWhileServiceIDStaysWindsurf() {
@@ -166,35 +192,15 @@ final class WindsurfDevinMigrationTests: XCTestCase {
     }
 }
 
-private func createWindsurfStateDB(at url: URL, entries: [(String, String)]) throws {
-    try? FileManager.default.removeItem(at: url)
-    var db: OpaquePointer?
-    guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
-        throw UsageError.invalidResponse
-    }
-    defer { sqlite3_close(db) }
-    guard sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value BLOB)", nil, nil, nil) == SQLITE_OK else {
-        throw UsageError.invalidResponse
-    }
-    for (key, value) in entries {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)", -1, &statement, nil) == SQLITE_OK else {
-            throw UsageError.invalidResponse
-        }
-        defer { sqlite3_finalize(statement) }
-        sqlite3_bind_text(statement, 1, key, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-        sqlite3_bind_text(statement, 2, value, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-        guard sqlite3_step(statement) == SQLITE_DONE else {
-            throw UsageError.invalidResponse
-        }
-    }
-}
+
 
 private func protoVarint(_ number: Int, _ value: UInt64) -> [UInt8] {
     encodeVarint(UInt64(number << 3)) + encodeVarint(value)
 }
 
-private func protoMessage(_ parts: [[UInt8]]) -> [UInt8] {
+/// Concatenates already-encoded fields into a flat field sequence. Deliberately not a
+/// length-delimited message: the parser reads these anchors at the top level.
+private func protoFields(_ parts: [[UInt8]]) -> [UInt8] {
     parts.flatMap { $0 }
 }
 

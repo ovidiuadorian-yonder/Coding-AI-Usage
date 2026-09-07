@@ -235,7 +235,8 @@ private func iso8601String(_ value: Date) -> String {
     ISO8601DateFormatter().string(from: value)
 }
 
-private func createWindsurfStateDatabase(at url: URL, entries: [(String, String)]) throws {
+// Shared across the Windsurf/Devin test files; deliberately not `private`.
+func createWindsurfStateDatabase(at url: URL, entries: [(String, String)]) throws {
     let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     var db: OpaquePointer?
     guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {

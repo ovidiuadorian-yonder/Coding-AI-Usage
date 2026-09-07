@@ -60,22 +60,27 @@ actor WindsurfUsageService: WindsurfUsageServing {
         }
 
         return candidates.max { lhs, rhs in
-            // `max(by:)` keeps the later element when the comparator reports "not greater", so a
-            // strict `<` preserves the earlier candidate on a tie — Devin, given the array order.
+            // `max(by:)` walks the sequence and replaces its running result only when the
+            // comparator returns true, so on a tie (`<` is false) the earlier candidate survives —
+            // Devin, given the order of `clientSupportDirectories`.
             lhs.modified < rhs.modified
         }?.path
     }
 
     func fetchUsage() async throws -> ServiceUsage {
-        guard let authStatus = try readAuthStatus(), !authStatus.apiKey.isEmpty else {
+        // Resolve the database once and reuse it for every read in this refresh. Resolving per
+        // read would let a mid-refresh write flip the winner between reads, combining an auth
+        // status from one client's database with quota and plan data from the other.
+        guard let stateDBPath = stateDBLocator(),
+              let authStatus = try readAuthStatus(in: stateDBPath), !authStatus.apiKey.isEmpty else {
             throw UsageError.noCredentials("\(Self.displayName): not logged in")
         }
 
-        let planInfo = try readCachedPlanInfo()
+        let planInfo = try readCachedPlanInfo(in: stateDBPath)
         let lastUpdated = now()
 
         let snapshot = try
-            readStructuredSnapshot(authStatus: authStatus, planInfo: planInfo) ??
+            readStructuredSnapshot(authStatus: authStatus, planInfo: planInfo, in: stateDBPath) ??
             planInfo?.quotaSnapshot
 
         guard let snapshot, isFresh(planEnd: snapshot.planEndDate) else {
@@ -117,42 +122,46 @@ actor WindsurfUsageService: WindsurfUsageServing {
     }
 
     func isLoggedIn() async -> Bool {
-        guard let authStatus = try? readAuthStatus() else {
+        guard let stateDBPath = stateDBLocator(),
+              let authStatus = try? readAuthStatus(in: stateDBPath) else {
             return false
         }
         return !authStatus.apiKey.isEmpty
     }
 
-    private func readAuthStatus() throws -> WindsurfAuthStatus? {
-        guard let value = try readStateValue(forKey: "windsurfAuthStatus") else {
+    private func readAuthStatus(in stateDBPath: String) throws -> WindsurfAuthStatus? {
+        guard let value = try readStateValue(forKey: "windsurfAuthStatus", in: stateDBPath) else {
             return nil
         }
         return try JSONDecoder().decode(WindsurfAuthStatus.self, from: Data(value.utf8))
     }
 
-    private func readCachedPlanInfo() throws -> WindsurfCachedPlanInfo? {
-        guard let value = try readStateValue(forKey: "windsurf.settings.cachedPlanInfo") else {
+    /// Reads the cached plan info **without** applying the freshness gate.
+    ///
+    /// The gate is applied once, in `fetchUsage`, to the fully merged snapshot. Gating here instead
+    /// would strip the only plan end the JSON-snapshot path has access to, leaving that source with
+    /// a nil plan end that the gate then reads as "cannot be judged" and retains — so a stale JSON
+    /// snapshot beside a stale plan info would be displayed as current, which is the defect this
+    /// gate exists to prevent.
+    private func readCachedPlanInfo(in stateDBPath: String) throws -> WindsurfCachedPlanInfo? {
+        guard let value = try readStateValue(forKey: "windsurf.settings.cachedPlanInfo", in: stateDBPath) else {
             return nil
         }
-        let planInfo = try JSONDecoder().decode(WindsurfCachedPlanInfo.self, from: Data(value.utf8))
-
-        // Freshness gate. This key is no longer written by the current client: it survives a
-        // Windsurf-to-Devin migration verbatim and keeps parsing cleanly while being months out of
-        // date, so an ungated read blends a dead billing period into today's numbers.
-        guard isFresh(planEnd: planInfo.endDate) else {
-            return nil
-        }
-        return planInfo
+        return try JSONDecoder().decode(WindsurfCachedPlanInfo.self, from: Data(value.utf8))
     }
 
-    private func readStructuredSnapshot(authStatus: WindsurfAuthStatus, planInfo: WindsurfCachedPlanInfo?) throws -> WindsurfPageSnapshot? {
+    private func readStructuredSnapshot(
+        authStatus: WindsurfAuthStatus,
+        planInfo: WindsurfCachedPlanInfo?,
+        in stateDBPath: String
+    ) throws -> WindsurfPageSnapshot? {
         let protoParser = WindsurfUserStatusProtoParser()
 
         if let snapshot = protoParser.parse(base64Encoded: authStatus.userStatusProtoBinaryBase64) {
             return merge(snapshot: snapshot, fallbackPlanInfo: planInfo)
         }
 
-        guard let rawState = try readStateValue(forKey: "codeium.windsurf"),
+        guard let rawState = try readStateValue(forKey: "codeium.windsurf", in: stateDBPath),
               let state = try JSONSerialization.jsonObject(with: Data(rawState.utf8)) as? [String: Any]
         else {
             return nil
@@ -232,11 +241,8 @@ actor WindsurfUsageService: WindsurfUsageServing {
     }
 
 
-    private func readStateValue(forKey key: String) throws -> String? {
+    private func readStateValue(forKey key: String, in stateDBPath: String) throws -> String? {
         var db: OpaquePointer?
-        guard let stateDBPath = stateDBLocator() else {
-            return nil
-        }
         guard sqlite3_open_v2(stateDBPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
             throw UsageError.invalidResponse
         }
