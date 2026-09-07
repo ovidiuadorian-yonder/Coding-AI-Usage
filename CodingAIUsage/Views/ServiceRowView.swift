@@ -55,9 +55,18 @@ struct WindowRow: View {
                 .tint(window.level.color)
 
             if let resetTime = window.resetTime {
-                Text("Resets \(resetTime, style: .relative)")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                switch ResetDisplay.mode(for: resetTime) {
+                case .countdown:
+                    Text("Resets \(resetTime, style: .relative)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                case .overdue:
+                    // Never fall through to `style: .relative` here: it prints the interval's
+                    // magnitude without direction, so an elapsed reset reads as time remaining.
+                    Text("Reset overdue (expected \(resetTime, format: .dateTime.day().month().hour().minute()))")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
         }
         .accessibilityElement(children: .ignore)

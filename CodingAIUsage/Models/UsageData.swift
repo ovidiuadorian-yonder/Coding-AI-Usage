@@ -135,3 +135,22 @@ enum UsageError: Error, LocalizedError, Equatable {
         }
     }
 }
+
+/// How a window's reset time should be presented.
+///
+/// SwiftUI's `.relative` date style prints the magnitude of an interval without its direction, so
+/// a reset that has already fired renders as though it were still ahead — a daily quota whose
+/// stored reset is three months old displayed as "Resets 3 mths, 2 days", next to a green
+/// "Healthy" badge. Elapsed resets are common in legitimately current data: the Windsurf/Devin
+/// proto carries the reset from the client's last quota sync rather than the next one, so this is
+/// a presentation concern and not a staleness signal.
+enum ResetDisplay: Equatable {
+    /// The reset is ahead; render a live-updating countdown.
+    case countdown
+    /// The reset has already fired; render it as overdue rather than as elapsed time remaining.
+    case overdue
+
+    static func mode(for resetTime: Date, now: Date = Date()) -> ResetDisplay {
+        resetTime > now ? .countdown : .overdue
+    }
+}
