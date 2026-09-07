@@ -319,6 +319,36 @@ final class UsageViewModel: ObservableObject {
         )
     }
 
+    /// Preserves a provider's last known windows while surfacing an error on the row.
+    ///
+    /// Replacing the value with empty `windows` loses the reading *and*, because the result is
+    /// persisted, discards the cached snapshot that would have survived the next launch.
+    nonisolated static func annotatingError(
+        _ message: String,
+        on previous: ServiceUsage?,
+        id: String,
+        displayName: String,
+        shortLabel: String,
+        now: Date = Date()
+    ) -> ServiceUsage {
+        guard let previous, !previous.windows.isEmpty else {
+            return ServiceUsage(
+                id: id, displayName: displayName, shortLabel: shortLabel,
+                windows: [], lastUpdated: now, error: message
+            )
+        }
+
+        return ServiceUsage(
+            id: previous.id,
+            displayName: previous.displayName,
+            shortLabel: previous.shortLabel,
+            windows: previous.windows,
+            lastUpdated: previous.lastUpdated,
+            error: message,
+            footerLines: previous.footerLines
+        )
+    }
+
     nonisolated static func rateLimitPause(
         results: [RefreshResult],
         now: Date,
@@ -418,9 +448,15 @@ final class UsageViewModel: ObservableObject {
                 await claudeService.invalidateCredentialCache()
                 lastPrerequisitesCheck = nil // Force re-check login status next poll
                 errors.append(error.localizedDescription)
-                claudeUsage = ServiceUsage(
-                    id: "claude", displayName: "Claude Code", shortLabel: "CC",
-                    windows: [], lastUpdated: Date(), error: error.localizedDescription
+                // Keep the last known windows and annotate them, rather than replacing the row
+                // with an empty one. Blanking it also overwrote the persisted snapshot, so a
+                // single transient auth failure destroyed the last good reading on disk.
+                claudeUsage = Self.annotatingError(
+                    error.localizedDescription,
+                    on: claudeUsage,
+                    id: "claude",
+                    displayName: "Claude Code",
+                    shortLabel: "CC"
                 )
                 if let claudeUsage { cacheStore.save(claudeUsage) }
                 return .failure

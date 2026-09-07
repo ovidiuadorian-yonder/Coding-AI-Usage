@@ -64,7 +64,7 @@ final class ClaudeDiagnosticsTests: XCTestCase {
         )
         let spy = DiagnosticSpy()
         let service = ClaudeUsageService(
-            credentialLoader: ClaudeCredentialLoader(homeDirectory: home, keychainService: .empty),
+            credentialLoader: ClaudeCredentialLoader(homeDirectory: home),
             networkClient: { request in
                 XCTAssertEqual(request.url?.absoluteString, "https://api.anthropic.com/api/oauth/usage")
                 let response = HTTPURLResponse(
@@ -88,65 +88,6 @@ final class ClaudeDiagnosticsTests: XCTestCase {
         XCTAssertFalse(line.contains("endpoint=token"), line)
     }
 
-    func testTokenEndpointRateLimitIsLoggedAsTokenEndpoint() async throws {
-        // An expired token forces a refresh first, so a 429 here is attributable to
-        // platform.claude.com and must be distinguishable from the usage-endpoint case above.
-        let home = try makeCredentialsDirectory(
-            accessToken: "stale-token",
-            refreshToken: "refresh-token",
-            expiresAt: 0
-        )
-        let spy = DiagnosticSpy()
-        let service = ClaudeUsageService(
-            credentialLoader: ClaudeCredentialLoader(homeDirectory: home, keychainService: .empty),
-            networkClient: { request in
-                XCTAssertEqual(request.url?.absoluteString, "https://platform.claude.com/v1/oauth/token")
-                let response = HTTPURLResponse(
-                    url: request.url!,
-                    statusCode: 429,
-                    httpVersion: nil,
-                    headerFields: ["Retry-After": "240"]
-                )!
-                return (Data(), response)
-            },
-            cliExecutor: { _, _ in .init(exitCode: 1, output: "") },
-            claudeBinaryLocator: { nil },
-            diagnostic: { spy.record($0) }
-        )
-
-        _ = try? await service.fetchUsage()
-
-        let line = try XCTUnwrap(spy.line(containing: "endpoint=token"), "expected a token-endpoint diagnostic, got \(spy.lines)")
-        XCTAssertTrue(line.contains("status=429"), line)
-        XCTAssertTrue(line.contains("retry-after=240"), line)
-    }
-
-    func testTokenEndpointInvalidGrantIsLoggedWithErrorCode() async throws {
-        // invalid_grant is the signature of the concurrent-client conflict (CodexBar #1161).
-        let home = try makeCredentialsDirectory(
-            accessToken: "stale-token",
-            refreshToken: "consumed-refresh",
-            expiresAt: 0
-        )
-        let spy = DiagnosticSpy()
-        let service = ClaudeUsageService(
-            credentialLoader: ClaudeCredentialLoader(homeDirectory: home, keychainService: .empty),
-            networkClient: { request in
-                let response = HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!
-                return (Data(#"{"error":"invalid_grant"}"#.utf8), response)
-            },
-            cliExecutor: { _, _ in .init(exitCode: 1, output: "") },
-            claudeBinaryLocator: { nil },
-            diagnostic: { spy.record($0) }
-        )
-
-        _ = try? await service.fetchUsage()
-
-        let line = try XCTUnwrap(spy.line(containing: "endpoint=token"), "expected a token-endpoint diagnostic, got \(spy.lines)")
-        XCTAssertTrue(line.contains("status=400"), line)
-        XCTAssertTrue(line.contains("error=invalid_grant"), line)
-    }
-
     func testMissingRetryAfterIsLoggedAsAbsent() async throws {
         // Sources disagree on whether Retry-After is sent at all, so its absence must be recorded
         // explicitly rather than omitted from the line.
@@ -157,7 +98,7 @@ final class ClaudeDiagnosticsTests: XCTestCase {
         )
         let spy = DiagnosticSpy()
         let service = ClaudeUsageService(
-            credentialLoader: ClaudeCredentialLoader(homeDirectory: home, keychainService: .empty),
+            credentialLoader: ClaudeCredentialLoader(homeDirectory: home),
             networkClient: { request in
                 let response = HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil, headerFields: nil)!
                 return (Data(), response)
@@ -171,41 +112,6 @@ final class ClaudeDiagnosticsTests: XCTestCase {
 
         let line = try XCTUnwrap(spy.line(containing: "endpoint=usage"))
         XCTAssertTrue(line.contains("retry-after=absent"), line)
-    }
-
-    func testServerSuppliedErrorCodeCannotForgeAnExtraLogLine() async throws {
-        // The line is logged .public and is parsed by eye and by grep, so a newline in a
-        // server-supplied value must not be able to fabricate a second, plausible-looking record.
-        let home = try makeCredentialsDirectory(
-            accessToken: "stale-token",
-            refreshToken: "consumed-refresh",
-            expiresAt: 0
-        )
-        let spy = DiagnosticSpy()
-        let service = ClaudeUsageService(
-            credentialLoader: ClaudeCredentialLoader(homeDirectory: home, keychainService: .empty),
-            networkClient: { request in
-                let response = HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!
-                return (Data(#"{"error":"bad\nendpoint=usage status=429 retry-after=absent"}"#.utf8), response)
-            },
-            cliExecutor: { _, _ in .init(exitCode: 1, output: "") },
-            claudeBinaryLocator: { nil },
-            diagnostic: { spy.record($0) }
-        )
-
-        _ = try? await service.fetchUsage()
-
-        // The neutralized text may still appear *inside* the error field — that is fine and is the
-        // point. What must not happen is a second record, or a record that a line-oriented reader
-        // would attribute to the usage endpoint. So assert on record boundaries, not on substrings.
-        XCTAssertEqual(spy.lines.count, 1, "expected exactly one record, got \(spy.lines)")
-        let line = try XCTUnwrap(spy.lines.first)
-        XCTAssertFalse(line.contains("\n"), "record must stay a single line: \(line)")
-        XCTAssertTrue(line.hasPrefix("endpoint=token "), line)
-        XCTAssertFalse(
-            spy.lines.contains { $0.hasPrefix("endpoint=usage") },
-            "forged usage-endpoint record: \(spy.lines)"
-        )
     }
 
     func testOverlongErrorCodeIsTruncated() throws {
@@ -226,92 +132,4 @@ final class ClaudeDiagnosticsTests: XCTestCase {
 
     // MARK: - Rotation probe
 
-    func testRotatedRefreshTokenIsReportedAsChanged() async throws {
-        // Settles the open question: if the endpoint returns a different refresh_token than the one
-        // presented, rotation is happening and the CLI's stored copy is being superseded.
-        let home = try makeCredentialsDirectory(
-            accessToken: "stale-token",
-            refreshToken: "original-refresh",
-            expiresAt: 0
-        )
-        let spy = DiagnosticSpy()
-        let service = ClaudeUsageService(
-            credentialLoader: ClaudeCredentialLoader(homeDirectory: home, keychainService: .empty),
-            networkClient: { request in
-                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                if request.url?.absoluteString == "https://platform.claude.com/v1/oauth/token" {
-                    return (Data(#"{"access_token":"fresh","refresh_token":"rotated-refresh","expires_in":3600}"#.utf8), response)
-                }
-                return (Data(Self.usageJSON.utf8), response)
-            },
-            cliExecutor: { _, _ in .init(exitCode: 1, output: "") },
-            claudeBinaryLocator: { nil },
-            diagnostic: { spy.record($0) }
-        )
-
-        _ = try await service.fetchUsage()
-
-        let line = try XCTUnwrap(spy.line(containing: "refresh-token-changed"), "expected a rotation diagnostic, got \(spy.lines)")
-        XCTAssertTrue(line.contains("refresh-token-changed=true"), line)
-    }
-
-    func testUnchangedRefreshTokenIsReportedAsUnchanged() async throws {
-        let home = try makeCredentialsDirectory(
-            accessToken: "stale-token",
-            refreshToken: "original-refresh",
-            expiresAt: 0
-        )
-        let spy = DiagnosticSpy()
-        let service = ClaudeUsageService(
-            credentialLoader: ClaudeCredentialLoader(homeDirectory: home, keychainService: .empty),
-            networkClient: { request in
-                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                if request.url?.absoluteString == "https://platform.claude.com/v1/oauth/token" {
-                    return (Data(#"{"access_token":"fresh","refresh_token":"original-refresh","expires_in":3600}"#.utf8), response)
-                }
-                return (Data(Self.usageJSON.utf8), response)
-            },
-            cliExecutor: { _, _ in .init(exitCode: 1, output: "") },
-            claudeBinaryLocator: { nil },
-            diagnostic: { spy.record($0) }
-        )
-
-        _ = try await service.fetchUsage()
-
-        let line = try XCTUnwrap(spy.line(containing: "refresh-token-changed"))
-        XCTAssertTrue(line.contains("refresh-token-changed=false"), line)
-    }
-
-    func testDiagnosticsNeverContainRawTokenMaterial() async throws {
-        // The log is written to the unified log store at .notice and marked .public, so it must
-        // never carry token material — only fingerprints.
-        // Deliberately distinctive values: a naive check for something like "fresh" would be a
-        // false positive against the literal "refresh-token-changed" in the log line itself.
-        let home = try makeCredentialsDirectory(
-            accessToken: "ACCESSSECRETAAA",
-            refreshToken: "STOREDSECRETBBB",
-            expiresAt: 0
-        )
-        let spy = DiagnosticSpy()
-        let service = ClaudeUsageService(
-            credentialLoader: ClaudeCredentialLoader(homeDirectory: home, keychainService: .empty),
-            networkClient: { request in
-                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                if request.url?.absoluteString == "https://platform.claude.com/v1/oauth/token" {
-                    return (Data(#"{"access_token":"NEWACCESSCCC","refresh_token":"ROTATEDSECRETDDD","expires_in":3600}"#.utf8), response)
-                }
-                return (Data(Self.usageJSON.utf8), response)
-            },
-            cliExecutor: { _, _ in .init(exitCode: 1, output: "") },
-            claudeBinaryLocator: { nil },
-            diagnostic: { spy.record($0) }
-        )
-
-        _ = try await service.fetchUsage()
-
-        let joined = spy.lines.joined(separator: "\n")
-        for secret in ["ACCESSSECRETAAA", "STOREDSECRETBBB", "NEWACCESSCCC", "ROTATEDSECRETDDD"] {
-            XCTAssertFalse(joined.contains(secret), "diagnostic leaked \(secret): \(joined)")
-        }
-    }
 }

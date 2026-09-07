@@ -2,7 +2,6 @@ import Foundation
 
 enum ClaudeCredentialSource: Equatable, Sendable {
     case file(path: String)
-    case keychain(serviceName: String)
 }
 
 struct ClaudeCredentials: Equatable, Sendable {
@@ -19,9 +18,18 @@ struct ClaudeCredentialCacheState {
     let cacheTTL: TimeInterval
 }
 
+/// Loads Claude Code OAuth credentials from a credentials **file** only.
+///
+/// The macOS Keychain is deliberately not consulted. Claude Code writes its credential item with
+/// `security add-generic-password -U`, which replaces the item's access control list on every
+/// token refresh, so a third-party reader's "Always Allow" grant is destroyed roughly every time
+/// the CLI refreshes — a login-keychain password prompt several times a day, with no upstream fix
+/// (anthropics/claude-code#22144, closed not planned). Reading a file needs no ACL and cannot
+/// prompt. When no file exists, the caller falls back to the `claude` CLI, which reads its own
+/// item using its own grant. See
+/// `docs/superpowers/specs/2026-09-07-claude-cli-primary-design.md`.
 final class ClaudeCredentialLoader {
     let homeDirectory: String
-    let keychainService: KeychainService
 
     private let now: () -> Date
     private let cacheTTL: TimeInterval
@@ -33,14 +41,12 @@ final class ClaudeCredentialLoader {
 
     init(
         homeDirectory: String = NSHomeDirectory(),
-        keychainService: KeychainService = KeychainService(),
         now: @escaping () -> Date = Date.init,
         cacheTTL: TimeInterval = 300,
         readFile: @escaping (String) -> Data? = { FileManager.default.contents(atPath: $0) },
         onInvalidate: @escaping () -> Void = {}
     ) {
         self.homeDirectory = homeDirectory
-        self.keychainService = keychainService
         self.now = now
         self.cacheTTL = cacheTTL
         self.readFile = readFile
@@ -72,20 +78,8 @@ final class ClaudeCredentialLoader {
         onInvalidate()
     }
 
-    func loadAnyCredentials(forceRefresh: Bool = false) throws -> ClaudeCredentials? {
-        if let cached = cachedCredentials(allowingFiles: true, allowingKeychain: true, forceRefresh: forceRefresh) {
-            return cached
-        }
-
-        if let fileCredentials = try loadFileCredentials(forceRefresh: forceRefresh) {
-            return fileCredentials
-        }
-
-        return try loadKeychainCredentials(forceRefresh: forceRefresh)
-    }
-
-    func loadFileCredentials(forceRefresh: Bool = false) throws -> ClaudeCredentials? {
-        if let cached = cachedCredentials(allowingFiles: true, allowingKeychain: false, forceRefresh: forceRefresh) {
+    func loadCredentials(forceRefresh: Bool = false) throws -> ClaudeCredentials? {
+        if !forceRefresh, let cached = validCachedCredentials() {
             return cached
         }
 
@@ -102,41 +96,16 @@ final class ClaudeCredentialLoader {
         return nil
     }
 
-    func loadKeychainCredentials(forceRefresh: Bool = false) throws -> ClaudeCredentials? {
-        if let cached = cachedCredentials(allowingFiles: false, allowingKeychain: true, forceRefresh: forceRefresh) {
-            return cached
-        }
-
-        guard let entry = try keychainService.readClaudeCredentialsEntry(),
-              let data = entry.json.data(using: .utf8),
-              let credentials = parseCredentials(
-                data: data,
-                source: .keychain(serviceName: entry.serviceName)
-              ) else {
-            return nil
-        }
-
-        cache(credentials)
-        return credentials
-    }
-
-    func needsRefresh(_ credentials: ClaudeCredentials) -> Bool {
-        guard credentials.refreshToken != nil else {
+    /// Whether the credential is unusable for a request starting now.
+    ///
+    /// A 60s skew keeps a request from starting with a token about to lapse mid-flight. A `nil`
+    /// expiry is treated as **usable**: the app cannot refresh, so inferring expiry from a missing
+    /// field would discard a working token. A 401 covers that case instead.
+    func isExpired(_ credentials: ClaudeCredentials, skew: TimeInterval = 60) -> Bool {
+        guard let expiresAt = credentials.expiresAt else {
             return false
         }
-
-        guard let expiresAt = credentials.expiresAt else {
-            return true
-        }
-
-        return now().addingTimeInterval(300) >= expiresAt
-    }
-
-    /// Updates the in-memory credential cache without writing to the Keychain or a file.
-    /// Used after an in-flight OAuth refresh so subsequent polls reuse the fresh token
-    /// while leaving the stored credential for the `claude` CLI to own.
-    func cacheRefreshedCredentials(_ credentials: ClaudeCredentials) {
-        cache(credentials)
+        return now().addingTimeInterval(skew) >= expiresAt
     }
 
     private var credentialFilePaths: [String] {
@@ -146,35 +115,17 @@ final class ClaudeCredentialLoader {
         ]
     }
 
-    // The cache holds a single credential slot. `allowingFiles`/`allowingKeychain` filter whether
-    // the cached slot matches what the caller is looking for — they do not select from separate pools.
-    private func cachedCredentials(
-        allowingFiles: Bool,
-        allowingKeychain: Bool,
-        forceRefresh: Bool
-    ) -> ClaudeCredentials? {
+    private func validCachedCredentials() -> ClaudeCredentials? {
         lock.lock()
         defer { lock.unlock() }
 
-        guard !forceRefresh,
-              let cachedCredentials else {
+        // Re-read every cacheTTL seconds so an external token refresh by the CLI is picked up.
+        guard let cachedCredentials,
+              let cachedAt,
+              now().timeIntervalSince(cachedAt) <= cacheTTL else {
             return nil
         }
-
-        switch cachedCredentials.source {
-        case .file:
-            // File credentials are re-read every cacheTTL seconds to pick up external token refreshes.
-            guard let cachedAt,
-                  now().timeIntervalSince(cachedAt) <= cacheTTL else {
-                return nil
-            }
-            return allowingFiles ? cachedCredentials : nil
-        case .keychain:
-            // Keychain credentials are not TTL-evicted — they remain cached until auth fails (401),
-            // at which point the caller refreshes and re-caches. This avoids repeated Keychain reads
-            // on every poll interval.
-            return allowingKeychain ? cachedCredentials : nil
-        }
+        return cachedCredentials
     }
 
     private func cache(_ credentials: ClaudeCredentials) {
@@ -220,5 +171,4 @@ final class ClaudeCredentialLoader {
 
         return nil
     }
-
 }

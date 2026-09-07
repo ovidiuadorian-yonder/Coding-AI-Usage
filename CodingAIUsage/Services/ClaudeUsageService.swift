@@ -17,11 +17,6 @@ actor ClaudeUsageService: ClaudeUsageServing {
     typealias CLIExecutor = @Sendable (_ binaryPath: String, _ arguments: [String]) -> ClaudeCLIExecutionResult
     typealias BinaryLocator = @Sendable () -> String?
 
-    private enum CredentialScope {
-        case file
-        case keychain
-    }
-
     private let credentialLoader: ClaudeCredentialLoader
     private let networkClient: NetworkClient
     private let diagnostic: DiagnosticRecorder
@@ -29,9 +24,6 @@ actor ClaudeUsageService: ClaudeUsageServing {
     private let claudeBinaryLocator: BinaryLocator
     private let cliParser = ClaudeCLIUsageParser()
     private let apiURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
-    private let refreshURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
-    private let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-    private let oauthScopes = "user:profile user:inference user:sessions:claude_code"
     private let userAgent = "claude-code/2.1.173"
 
     init(
@@ -55,24 +47,31 @@ actor ClaudeUsageService: ClaudeUsageServing {
     }
 
     func fetchUsage() async throws -> ServiceUsage {
-        // File and Keychain are alternative credential sources, tried in priority order. A non-auth
-        // error (rate limit / network) from the chosen source propagates to the caller and is recovered
-        // by polling backoff; we intentionally do not fall back across sources on transient failures.
-        if let fileCredentials = try credentialLoader.loadFileCredentials() {
-            return try await fetchUsageViaAPI(
-                startingWith: fileCredentials,
-                credentialScope: .file
-            )
+        // A credentials *file* is preferred when one exists: reading it needs no Keychain ACL, so
+        // it cannot prompt, and the JSON API carries more than the CLI screen does. On macOS no
+        // such file normally exists — Claude Code keeps credentials in the Keychain, which this
+        // app deliberately never reads — so the CLI is the working path here.
+        if let credentials = try credentialLoader.loadCredentials(),
+           !credentialLoader.isExpired(credentials) {
+            do {
+                return try await performUsageRequest(accessToken: credentials.accessToken)
+            } catch let error as UsageError {
+                guard case .authExpired = error else { throw error }
+
+                // A 401 can simply mean the CLI rotated the file token since we cached it. Re-read
+                // once and retry; a file read costs nothing and cannot prompt for Keychain access.
+                // `performUsageRequest` already invalidated the cache, so this reload hits disk.
+                guard let reloaded = try credentialLoader.loadCredentials(forceRefresh: true),
+                      reloaded.accessToken != credentials.accessToken else {
+                    throw error
+                }
+                return try await performUsageRequest(accessToken: reloaded.accessToken)
+            }
         }
 
-        if let keychainCredentials = try credentialLoader.loadKeychainCredentials() {
-            return try await fetchUsageViaAPI(
-                startingWith: keychainCredentials,
-                credentialScope: .keychain
-            )
-        }
-
-        // Last-resort fallback: scrape the CLI only when no token is available via file or Keychain.
+        // An expired file token falls through rather than being refreshed. Refreshing would
+        // present a grant the `claude` CLI also owns and rotates, which is what produced the
+        // observed 429s from the token endpoint.
         if let claudePath = claudeBinaryLocator() {
             return try fetchUsageViaCLI(binaryPath: claudePath)
         }
@@ -107,140 +106,6 @@ actor ClaudeUsageService: ClaudeUsageServing {
         }
     }
 
-    private func fetchUsageViaAPI(
-        startingWith credentials: ClaudeCredentials,
-        credentialScope: CredentialScope,
-        didReloadCredentials: Bool = false
-    ) async throws -> ServiceUsage {
-        var activeCredentials = credentials
-        // Only refresh proactively on the first attempt. After a 401 we reload the freshest
-        // stored credential (the `claude` CLI may have rotated it) and try it directly — refreshing
-        // again here would re-use our already-consumed refresh token and yield a false invalid_grant.
-        if !didReloadCredentials, credentialLoader.needsRefresh(activeCredentials) {
-            activeCredentials = try await refreshCredentials(activeCredentials)
-        }
-
-        do {
-            return try await performUsageRequest(accessToken: activeCredentials.accessToken)
-        } catch let error as UsageError {
-            guard case .authExpired = error else {
-                throw error
-            }
-
-            credentialLoader.invalidateCache()
-            guard !didReloadCredentials,
-                  let reloaded = try reloadCredentials(scope: credentialScope) else {
-                throw error
-            }
-
-            return try await fetchUsageViaAPI(
-                startingWith: reloaded,
-                credentialScope: credentialScope,
-                didReloadCredentials: true
-            )
-        }
-    }
-
-    private func reloadCredentials(scope: CredentialScope) throws -> ClaudeCredentials? {
-        switch scope {
-        case .file:
-            return try credentialLoader.loadFileCredentials(forceRefresh: true)
-        case .keychain:
-            return try credentialLoader.loadKeychainCredentials(forceRefresh: true)
-        }
-    }
-
-    private func refreshCredentials(_ credentials: ClaudeCredentials) async throws -> ClaudeCredentials {
-        guard let refreshToken = credentials.refreshToken else {
-            return credentials
-        }
-
-        var request = URLRequest(url: refreshURL)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 15
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-            "client_id": oauthClientID,
-            "scope": oauthScopes
-        ])
-
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await networkClient(request)
-        } catch {
-            throw UsageError.networkError("Claude Code: \(error.localizedDescription)")
-        }
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw UsageError.invalidResponse
-        }
-
-        if httpResponse.statusCode == 400 || httpResponse.statusCode == 401 {
-            // Every 400/401 from this endpoint means the same thing to us — the stored grant is no
-            // longer usable — so the error code is recorded for diagnosis rather than branched on.
-            // `invalid_grant` specifically is the signature of the concurrent-client conflict.
-            let errorCode = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
-                .flatMap { $0?["error"] as? String }
-            logEndpoint(
-                "token",
-                status: httpResponse.statusCode,
-                response: httpResponse,
-                extra: "error=" + DiagnosticLog.field(errorCode ?? "unknown")
-            )
-
-            throw UsageError.authExpired("Claude Code: session expired - please re-login in Claude Code")
-        }
-
-        if httpResponse.statusCode == 429 {
-            logEndpoint("token", status: 429, response: httpResponse)
-            // The token endpoint is rate-limited. Surface this as .rateLimited (not .httpError) so
-            // menu-open refreshes pause for Retry-After — a near-expiry token makes needsRefresh true
-            // on every fetch, so retrying here before the limit clears keeps the rate limit alive.
-            let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After")
-                .flatMap { Double($0) }
-            throw UsageError.rateLimited(retryAfter: retryAfter)
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            logEndpoint("token", status: httpResponse.statusCode, response: httpResponse)
-            throw UsageError.httpError(httpResponse.statusCode)
-        }
-
-        guard let refreshResponse = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let accessToken = refreshResponse["access_token"] as? String else {
-            throw UsageError.invalidResponse
-        }
-
-        // Rotation probe: does the endpoint hand back a different refresh token than the one
-        // presented? If it consistently does, the stored credential the `claude` CLI owns is being
-        // superseded by our refresh — the mechanism behind CodexBar #1161. Fingerprints only.
-        let returnedRefreshToken = refreshResponse["refresh_token"] as? String
-        let changed = returnedRefreshToken != nil && returnedRefreshToken != refreshToken
-        logEndpoint(
-            "token",
-            status: 200,
-            response: httpResponse,
-            extra: "refresh-token-changed=\(changed) "
-                + "sent=\(DiagnosticLog.fingerprint(refreshToken)) "
-                + "returned=\(DiagnosticLog.fingerprint(returnedRefreshToken))"
-        )
-
-        let expiresAt = (refreshResponse["expires_in"] as? Double)
-            .map { Date().addingTimeInterval($0) }
-        let updatedCredentials = ClaudeCredentials(
-            accessToken: accessToken,
-            refreshToken: (refreshResponse["refresh_token"] as? String) ?? credentials.refreshToken,
-            expiresAt: expiresAt,
-            source: credentials.source,
-            rawPayload: credentials.rawPayload
-        )
-        credentialLoader.cacheRefreshedCredentials(updatedCredentials)
-        return updatedCredentials
-    }
-
     private func performUsageRequest(accessToken: String) async throws -> ServiceUsage {
         var request = URLRequest(url: apiURL)
         request.httpMethod = "GET"
@@ -268,6 +133,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
             return usage.toServiceUsage()
         case 401, 403:
             logEndpoint("usage", status: httpResponse.statusCode, response: httpResponse)
+            credentialLoader.invalidateCache()
             throw UsageError.authExpired("Claude Code: session expired - please re-login in Claude Code")
         case 429:
             logEndpoint("usage", status: 429, response: httpResponse)
@@ -305,7 +171,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
             "/opt/homebrew/bin/claude",
             NSHomeDirectory() + "/.local/bin/claude"
         ]
-        for path in paths where FileManager.default.isExecutableFile(atPath: path) {
+        for path in paths where isTrustworthyExecutable(atPath: path) {
             return path
         }
 
@@ -323,10 +189,44 @@ actor ClaudeUsageService: ClaudeUsageServing {
             guard process.terminationStatus == 0 else { return nil }
             let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
             let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            return path.isEmpty ? nil : path
+            return isTrustworthyExecutable(atPath: path) ? path : nil
         } catch {
             return nil
         }
+    }
+
+    /// Whether a resolved `claude` path is safe to execute.
+    ///
+    /// Hardening, not a fix for a known exploit: executing a binary someone else can overwrite
+    /// crosses no privilege boundary here, since planting one already requires code execution as
+    /// this user. But the CLI went from last-resort fallback to the primary Claude source in this
+    /// change, so the path is now taken on every refresh and is worth a cheap sanity check.
+    ///
+    /// Rejects a world- or group-writable binary, and one whose containing directory is
+    /// world-writable — the classic way a dropped file becomes a hijack. A path writable only by
+    /// this user is accepted: `~/.local/bin` is a legitimate install location and sits inside the
+    /// same trust boundary as the app itself.
+    static func isTrustworthyExecutable(
+        atPath path: String,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        guard !path.isEmpty, fileManager.isExecutableFile(atPath: path) else {
+            return false
+        }
+
+        func isWritableByOthers(_ itemPath: String) -> Bool {
+            guard let attributes = try? fileManager.attributesOfItem(atPath: itemPath),
+                  let permissions = (attributes[.posixPermissions] as? NSNumber)?.uint16Value else {
+                // Unreadable attributes: fail closed rather than execute something unverifiable.
+                return true
+            }
+            let groupWrite: UInt16 = 0o020
+            let otherWrite: UInt16 = 0o002
+            return permissions & (groupWrite | otherWrite) != 0
+        }
+
+        guard !isWritableByOthers(path) else { return false }
+        return !isWritableByOthers((path as NSString).deletingLastPathComponent)
     }
 
     private static func defaultCLIExecutor(binaryPath: String, arguments: [String]) -> ClaudeCLIExecutionResult {

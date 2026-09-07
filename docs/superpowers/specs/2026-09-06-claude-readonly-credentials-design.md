@@ -1,7 +1,13 @@
 # Claude Read-Only Credentials — Design
 
 **Date:** 2026-09-06
-**Status:** Approved (pending spec review)
+**Status:** SUPERSEDED by `2026-09-07-claude-cli-primary-design.md`
+
+> Its diagnosis was confirmed and its instrumentation shipped; its *remedy* is superseded.
+> Reading Claude Code's own Keychain item turned out to be unworkable for a second, independent
+> reason — the CLI's `security add-generic-password -U` write resets the item's ACL, so no amount
+> of "Always Allow" survives a token refresh. The successor removes Keychain access altogether,
+> which subsumes Part C and makes Parts A and B moot. Part D carries over.
 **Scope:** `Coding AI Usage` macOS menu-bar app — Claude Code credential acquisition only
 **Supersedes:** Part C of `2026-06-11-claude-credentials-and-reset-design.md` (extends it from
 "don't write the token back" to "don't refresh the token at all")

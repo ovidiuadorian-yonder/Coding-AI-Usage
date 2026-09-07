@@ -248,7 +248,7 @@ final class UsageViewModelTests: XCTestCase {
         viewModel.showCodex = false
         viewModel.showWindsurf = false
 
-        _ = try? loader.loadAnyCredentials()
+        _ = try? loader.loadCredentials()
         XCTAssertEqual(loader.cacheState.cachedAccessToken, "file-token")
 
         await viewModel.performManualRefresh()
