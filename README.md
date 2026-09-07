@@ -1,6 +1,6 @@
 # Coding AI Usage
 
-> A lightweight, native macOS menu bar app that keeps your **Claude Code**, **OpenAI Codex**, and **Windsurf** usage visible at all times.
+> A lightweight, native macOS menu bar app that keeps your **Claude Code**, **OpenAI Codex**, and **Devin** (formerly Windsurf) usage visible at all times.
 
 ![macOS](https://img.shields.io/badge/macOS-14.0%2B-blue?logo=apple&logoColor=white)
 ![Swift](https://img.shields.io/badge/Swift-5.9-orange?logo=swift&logoColor=white)
@@ -14,7 +14,7 @@
 ```
 CC 5h% 50 | w% 63  CX 5h% 99 | w% 89  W d% 99 | w% 81
 ```
-- `CC` = Claude Code (purple badge), `CX` = Codex (teal badge), `W` = Windsurf (blue badge)
+- `CC` = Claude Code (purple badge), `CX` = Codex (teal badge), `D` = Devin (blue badge)
 - `5h%` = 5-hour window remaining, `d%` = daily window remaining, `w%` = weekly window remaining
 - Numbers are color-coded: **green** (≥ 30%), **yellow** (10–30%), **red** (< 10%)
 
@@ -24,11 +24,12 @@ CC 5h% 50 | w% 63  CX 5h% 99 | w% 89  W d% 99 | w% 81
 
 ## Features
 
-- **Real-time usage tracking** for Claude Code, OpenAI Codex, and Windsurf
+- **Real-time usage tracking** for Claude Code, OpenAI Codex, and Devin
 - **Compact status bar** showing remaining percentages at a glance
 - **Detailed dropdown** with progress bars and reset timers
-- **Windsurf footer metadata** for plan end date and extra usage balance
-- **Local-first Windsurf parsing** from cached app state, with a scrape fallback only when exact quotas are missing
+- **Devin footer metadata** for plan end date and extra usage balance
+- **No Keychain access at all** - the app never reads a Keychain item, so it never asks for your login password
+- **Local-first Devin parsing** from the client's cached app state, with stale sources rejected rather than shown as current
 - **Smart alerts** via macOS notifications when usage drops below a configurable threshold (default: 10%)
 - **On-demand refresh only** - usage is fetched when you open the menu (throttled to once a minute) or click Refresh; there is no background polling
 - **Manual refresh** button for on-demand updates
@@ -50,7 +51,7 @@ Before installing, make sure you have:
 | **Self-signed code-signing cert** (build-from-source only) | `security find-identity -v -p codesigning \| grep "Coding AI Usage Self-Signed"` | See "Code Signing" below |
 | **Claude Code CLI** | `which claude` | [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) |
 | **OpenAI Codex CLI** | `which codex` | [Install Codex](https://github.com/openai/codex) |
-| **Windsurf** | `ls /Applications/Windsurf.app` | [Install Windsurf](https://windsurf.com/) |
+| **Devin** (formerly Windsurf) | `ls /Applications/Devin.app` | [Install Devin](https://devin.ai/desktop) |
 
 **All services must be logged in:**
 ```bash
@@ -61,16 +62,19 @@ claude
 codex login
 ```
 
-For Windsurf, open the app and sign in normally. The app reads Windsurf's local state first, including cached quota data from `state.vscdb`, and only falls back to an experimental session-backed scrape when exact daily or weekly quotas are not present locally.
+For Devin, open the app and sign in normally. The app reads the client's local `state.vscdb`, auto-detecting whichever of `~/Library/Application Support/Devin/` or `.../Windsurf/` was written most recently, so both the current client and a pre-rebrand install work. Sources whose billing period has already ended are discarded rather than displayed, so a leftover directory from before the rebrand cannot serve months-old numbers as current.
 
 ---
 
 ## Code Signing (one-time, build-from-source)
 
-The app reads your Claude Code OAuth token from the macOS Keychain. macOS ties a
-"Always Allow" Keychain grant to the app's code-signing identity, so an **unsigned/ad-hoc**
-build is treated as a new app on every rebuild and re-prompts you each time. `build.sh` signs
-the bundle with a **stable self-signed identity** so the grant persists.
+`build.sh` signs the bundle with a **stable self-signed identity**, and fails loudly if that
+identity is missing, so it is still a build prerequisite.
+
+> **Note:** signing used to exist to keep a Keychain "Always Allow" grant alive across rebuilds.
+> That reason is gone - the app no longer reads any Keychain item (see
+> [How It Works](#how-it-works)). Signing is retained for a stable app identity; it is no longer
+> load-bearing for credentials.
 
 Create the identity once (free, no Apple Developer account):
 
@@ -85,8 +89,7 @@ If you have an Apple Developer ID, use it instead:
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./deploy.sh
 ```
 
-The first refresh after switching identities prompts once for Keychain access — click
-**"Always Allow"** and it will stick across all future rebuilds.
+Switching identities no longer causes any credential prompt, because no Keychain item is read.
 
 ---
 
@@ -132,15 +135,17 @@ defaults delete com.ovidiuadorian.CodingAIUsage
 
 ## First Run
 
-On the first launch, macOS will prompt you for permissions:
+On the first launch, macOS may prompt you for one permission:
 
-1. **Keychain Access** - The app reads your Claude Code OAuth token from the macOS Keychain on the first manual refresh. Click **"Always Allow"** to avoid being prompted every time.
+1. **Notifications** (optional) - Allow notifications to receive alerts when your usage is running low.
 
-2. **Notifications** (optional) - Allow notifications to receive alerts when your usage is running low.
+**There is no Keychain prompt.** The app reads no Keychain items. If you used an earlier version
+and granted it access to `Claude Code-credentials`, that grant is now unused and you can remove
+the app from that item's Access Control list in **Keychain Access.app**.
 
-> **Tip:** If you accidentally clicked "Deny" on the Keychain prompt, you can reset it by opening **Keychain Access.app**, finding the `Claude Code-credentials` entry, and removing the app from its Access Control list. The app will prompt again on the next refresh.
->
-> **Startup behavior:** The app no longer reads Keychain, Codex auth, or Windsurf state automatically on launch. It waits for a manual refresh, then caches the last successful snapshot so later relaunches can show the previous usage immediately.
+> **Startup behavior:** The app does not read Codex auth or Devin state automatically on launch.
+> It waits for a manual refresh, then caches the last successful snapshot so later relaunches can
+> show the previous usage immediately.
 
 ---
 
@@ -152,10 +157,10 @@ The status bar text updates whenever a refresh runs (opening the dropdown or cli
 
 | Display | Meaning |
 |---|---|
-| `CC 5h% 50 \| w% 63  CX 5h% 99 \| w% 89  W d% 99 \| w% 81` | All services enabled with usage data |
+| `CC 5h% 50 \| w% 63  CX 5h% 99 \| w% 89  D d% 99 \| w% 81` | All services enabled with usage data |
 | `CC 5h% 50 \| w% 63` | Only Claude Code enabled |
 | `CX 5h% 99 \| w% 89` | Only Codex enabled |
-| `W d% 99 \| w% 81` | Only Windsurf enabled |
+| `D d% 99 \| w% 81` | Only Devin enabled |
 | `Coding Usage` | No services enabled or no data yet |
 
 - **5h%** = percentage remaining in the 5-hour rolling window
@@ -181,7 +186,7 @@ Click the menu bar text to open the detail panel. Opening the panel triggers a r
 
 | Setting | Options | Default |
 |---|---|---|
-| **Services** | Toggle Claude Code / Codex / Windsurf on or off | All enabled |
+| **Services** | Toggle Claude Code / Codex / Devin on or off | All enabled |
 | **Alert Threshold** | 5% to 30% | 10% |
 | **Launch at Login** | On / Off | Off |
 
@@ -191,19 +196,21 @@ Click the menu bar text to open the detail panel. Opening the panel triggers a r
 
 The app reads locally stored credentials and usage state:
 
-| Service | Credentials Source | API Endpoint |
+| Service | Source | Endpoint |
 |---|---|---|
-| **Claude Code** | macOS Keychain (`Claude Code-credentials`) | `api.anthropic.com/api/oauth/usage` |
+| **Claude Code** | `claude /usage` (the CLI reads its own credential) | none - local process |
 | **Codex** | `~/.codex/auth.json` | `chatgpt.com/backend-api/wham/usage` |
-| **Windsurf** | `~/Library/Application Support/Windsurf/User/globalStorage/state.vscdb` | Local cached user-status protobuf in `windsurfAuthStatus` / `codeium.windsurf`, with experimental session-backed scrape of `windsurf.com/subscription/usage` only as a fallback |
+| **Devin** | `~/Library/Application Support/{Devin,Windsurf}/User/globalStorage/state.vscdb` - whichever was written most recently | none - local `windsurfAuthStatus` / `codeium.windsurf` state |
 
-- **No passwords or API keys are stored by the app** - it reads existing credentials that the CLI tools have already saved
-- **The app never writes to the Keychain** - if the Claude OAuth token needs refreshing, the app refreshes it in memory for that request only and lets the `claude` CLI own the stored token
-- **Claude usage comes from the JSON API** (`api.anthropic.com/api/oauth/usage`) sent with a `claude-code` User-Agent; the `claude /usage` CLI screen is only scraped as a last-resort fallback when no token is available
-- **Protected resources are deferred until you interact with the app** - launch does not read Keychain or service files; the first read happens when you open the menu or click Refresh
-- **Last known usage is cached locally** - successful refreshes are persisted and restored on relaunch so the dropdown is not empty between sessions
-- **Windsurf exact daily/weekly quotas are required** - billing-cycle-only cache data is not shown in the compact menu bar
-- **Windsurf local source order** - cached user-status protobuf first, cached JSON snapshot second, experimental authenticated scrape last
+- **No passwords or API keys are stored by the app** - it reads state the CLI tools and clients have already saved
+- **The app reads no Keychain items, and never writes one.** Claude Code rewrites its credential item on every token refresh in a way that resets the item's access control list, so a third-party reader's "Always Allow" grant is destroyed several times a day ([claude-code#22144](https://github.com/anthropics/claude-code/issues/22144), closed as not planned). Rather than re-prompt you forever, the app asks the `claude` CLI for its usage screen and parses that - the CLI reads its own item with its own grant
+- **Claude usage comes from `claude /usage`** (~3s per probe). If a credentials *file* exists at `~/.claude/.credentials.json` it is preferred instead, since reading a file needs no Keychain access and the JSON API (`api.anthropic.com/api/oauth/usage`) carries more detail. That file does not normally exist on macOS
+- **The app never refreshes an OAuth token.** It shares the credential with the `claude` CLI, and refreshing a grant the CLI also rotates rate-limits the token endpoint. The CLI owns refreshing; the app only reads
+- **Stale local sources are discarded, not displayed.** A Devin/Windsurf source whose billing period has already ended is rejected rather than shown as current
+- **A reset that has already passed is shown as overdue**, never as time remaining
+- **Protected resources are deferred until you interact with the app** - the first read happens when you open the menu or click Refresh
+- **Last known usage is cached locally** - successful refreshes are persisted and restored on relaunch, and a transient auth error annotates the row rather than wiping the cached reading
+- **Devin exact daily/weekly quotas are required** - billing-cycle-only cache data is not shown in the compact menu bar
 - **No background polling** - refreshes run only when you open the menu (throttled to once a minute, with a 15-minute Claude Code cache window) or click Refresh
 - When a provider reports a rate limit, menu-open refreshes pause until the reported `Retry-After` expires (5 minutes if none is given); clicking **Refresh** retries immediately
 
@@ -213,13 +220,18 @@ The app reads locally stored credentials and usage state:
 
 | Permission | Why | When Prompted |
 |---|---|---|
-| **Keychain Access** | Read Claude Code OAuth token | First refresh |
-| **Network** | HTTPS to `api.anthropic.com`, `chatgpt.com`, and `windsurf.com` | First refresh and later manual/menu-open refreshes |
 | **Notifications** | Low-usage alerts | First launch |
+| **Network** | HTTPS to `chatgpt.com` (and `api.anthropic.com` only if a Claude credentials file exists) | First refresh and later manual/menu-open refreshes |
 | **File System** (`~/.codex/`) | Read Codex auth token | First refresh and later manual/menu-open refreshes |
-| **File System** (`~/Library/Application Support/Windsurf/`) | Read Windsurf state DB and fallback cookies | First refresh and later manual/menu-open refreshes |
+| **File System** (`~/Library/Application Support/{Devin,Windsurf}/`) | Read the Devin client state DB | First refresh and later manual/menu-open refreshes |
+| **Subprocess** (`claude`) | Run `claude /usage` to read Claude Code usage | First refresh and later manual/menu-open refreshes |
 
-The app is **not sandboxed** by design. It needs cross-app Keychain access and filesystem access to `~/.codex/` that macOS sandboxing would block. This is the same approach used by other developer tools like CodexBar and Claude-Usage-Tracker.
+**No Keychain permission is required or requested.** Earlier versions read
+`Claude Code-credentials` directly and decrypted browser cookie jars for a Windsurf scrape
+fallback; both were removed.
+
+The app is **not sandboxed** by design: it needs filesystem access to `~/.codex/` and the client
+state directories, and it spawns the `claude` CLI - all of which macOS sandboxing would block.
 
 ---
 
@@ -228,16 +240,16 @@ The app is **not sandboxed** by design. It needs cross-app Keychain access and f
 | Error Message | Cause | Fix |
 |---|---|---|
 | `Claude Code not installed` | `claude` CLI not found in PATH | [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) |
-| `Claude Code: not logged in` | No OAuth token in Keychain | Run `claude` and complete the login flow |
-| `Claude Code: session expired` | OAuth token expired | Re-login: run `claude` in terminal |
-| `Claude Code: rate limited` | Anthropic API rate limiting | Automatic retry; click Refresh to retry now |
+| `Claude Code: not logged in` | `claude /usage` reported no session, and no credentials file exists | Run `claude` and complete the login flow |
+| `Claude Code: session expired` | The credentials file's token expired and the CLI could not be reached | Re-login: run `claude` in terminal |
+| `Claude Code: rate limited` | Anthropic API rate limiting (only reachable via the credentials-file path) | Automatic backoff; click Refresh to retry now |
 | `Codex not installed` | `codex` CLI not found in PATH | [Install Codex CLI](https://github.com/openai/codex) |
 | `Codex: not logged in` | No auth token in `~/.codex/auth.json` | Run `codex login` |
 | `Codex: session expired` | ChatGPT OAuth token expired | Run `codex login` to re-authenticate |
-| `Windsurf not installed` | Windsurf app support files not found | Install and open Windsurf |
-| `Windsurf: not logged in` | No Windsurf auth state in the local state DB | Sign in inside Windsurf |
-| `Windsurf: daily/weekly quota unavailable` | Exact daily/weekly quotas were missing from local cached state and the fallback scrape could not recover them | Open Windsurf, let the Plan Info page load, then refresh |
-| Keychain prompt every time | Clicked "Allow" instead of "Always Allow" | Open Keychain Access, find `Claude Code-credentials`, update Access Control |
+| `Devin not installed` | No Devin or Windsurf state database found | Install and open Devin |
+| `Devin: not logged in` | No auth state in the client's local state DB | Sign in inside Devin |
+| `Devin: daily/weekly quota unavailable` | Exact quotas were missing from local state, or every local source's billing period had already ended | Open Devin, let the Plan Info page load, then refresh |
+| `Reset overdue` on a row | The client's stored reset timestamp is from its last quota sync, not the next reset | Expected; it is not an error |
 | Only `Click Refresh to load usage.` is showing | No cached snapshot exists yet for this install | Click Refresh once to seed the cache |
 | Relaunch shows old values | The app restores the last cached snapshot until the next successful refresh | Click Refresh to fetch current usage |
 
@@ -275,13 +287,12 @@ CodingAIUsage/
 │   ├── UsageData.swift             # Core types: UsageWindow, ServiceUsage, UsageLevel
 │   ├── ClaudeUsageResponse.swift   # Anthropic API response model
 │   ├── CodexUsageData.swift        # ChatGPT API response model
-│   └── WindsurfUsageData.swift     # Windsurf cache, protobuf, and page parsing models
+│   └── WindsurfUsageData.swift     # Devin/Windsurf cache and protobuf models
 ├── Services/
-│   ├── KeychainService.swift       # macOS Keychain reader
 │   ├── ClaudeUsageService.swift    # Claude API client
 │   ├── CodexUsageService.swift     # Codex API client
 │   ├── UsageCacheStore.swift       # Persist last-known service snapshots between launches
-│   ├── WindsurfUsageService.swift  # Windsurf local state reader + fallback usage scraper
+│   ├── WindsurfUsageService.swift  # Devin/Windsurf local state reader
 │   └── NotificationService.swift   # Alert notifications
 ├── ViewModels/
 │   └── UsageViewModel.swift        # Central state management
