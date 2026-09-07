@@ -56,6 +56,14 @@ actor WindsurfUsageService: WindsurfUsageServing {
                   let modified = attributes[.modificationDate] as? Date else {
                 return nil
             }
+            // `attributesOfItem` does not traverse a final symlink but `sqlite3_open_v2` does, so a
+            // link here would be stat'ed as one file and opened as another. Nothing read from this
+            // database is echoed or transmitted, so this is hardening rather than a known exploit —
+            // but the asymmetry is free to close, and a redirected path would silently report
+            // another file's quota as this client's.
+            guard Self.resolvesWithin(homeDirectory: homeDirectory, path: path, attributes: attributes) else {
+                return nil
+            }
             return (path, modified)
         }
 
@@ -65,6 +73,26 @@ actor WindsurfUsageService: WindsurfUsageServing {
             // Devin, given the order of `clientSupportDirectories`.
             lhs.modified < rhs.modified
         }?.path
+    }
+
+    /// Whether a candidate state-database path is safe to open.
+    ///
+    /// A regular file is accepted as-is. A symlink is accepted only when it resolves to somewhere
+    /// still inside the user's home directory, which permits legitimate relocation (a client
+    /// directory moved to another volume and linked back) while refusing redirection to an
+    /// arbitrary file elsewhere on the system.
+    static func resolvesWithin(
+        homeDirectory: String,
+        path: String,
+        attributes: [FileAttributeKey: Any]
+    ) -> Bool {
+        guard (attributes[.type] as? FileAttributeType) == .typeSymbolicLink else {
+            return true
+        }
+
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        let root = URL(fileURLWithPath: homeDirectory).resolvingSymlinksInPath().path
+        return resolved == root || resolved.hasPrefix(root + "/")
     }
 
     func fetchUsage() async throws -> ServiceUsage {

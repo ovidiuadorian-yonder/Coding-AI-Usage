@@ -171,7 +171,7 @@ actor ClaudeUsageService: ClaudeUsageServing {
             "/opt/homebrew/bin/claude",
             NSHomeDirectory() + "/.local/bin/claude"
         ]
-        for path in paths where FileManager.default.isExecutableFile(atPath: path) {
+        for path in paths where isTrustworthyExecutable(atPath: path) {
             return path
         }
 
@@ -189,10 +189,44 @@ actor ClaudeUsageService: ClaudeUsageServing {
             guard process.terminationStatus == 0 else { return nil }
             let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
             let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            return path.isEmpty ? nil : path
+            return isTrustworthyExecutable(atPath: path) ? path : nil
         } catch {
             return nil
         }
+    }
+
+    /// Whether a resolved `claude` path is safe to execute.
+    ///
+    /// Hardening, not a fix for a known exploit: executing a binary someone else can overwrite
+    /// crosses no privilege boundary here, since planting one already requires code execution as
+    /// this user. But the CLI went from last-resort fallback to the primary Claude source in this
+    /// change, so the path is now taken on every refresh and is worth a cheap sanity check.
+    ///
+    /// Rejects a world- or group-writable binary, and one whose containing directory is
+    /// world-writable — the classic way a dropped file becomes a hijack. A path writable only by
+    /// this user is accepted: `~/.local/bin` is a legitimate install location and sits inside the
+    /// same trust boundary as the app itself.
+    static func isTrustworthyExecutable(
+        atPath path: String,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        guard !path.isEmpty, fileManager.isExecutableFile(atPath: path) else {
+            return false
+        }
+
+        func isWritableByOthers(_ itemPath: String) -> Bool {
+            guard let attributes = try? fileManager.attributesOfItem(atPath: itemPath),
+                  let permissions = (attributes[.posixPermissions] as? NSNumber)?.uint16Value else {
+                // Unreadable attributes: fail closed rather than execute something unverifiable.
+                return true
+            }
+            let groupWrite: UInt16 = 0o020
+            let otherWrite: UInt16 = 0o002
+            return permissions & (groupWrite | otherWrite) != 0
+        }
+
+        guard !isWritableByOthers(path) else { return false }
+        return !isWritableByOthers((path as NSString).deletingLastPathComponent)
     }
 
     private static func defaultCLIExecutor(binaryPath: String, arguments: [String]) -> ClaudeCLIExecutionResult {
